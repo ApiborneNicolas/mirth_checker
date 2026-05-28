@@ -17,52 +17,113 @@ import os
 import re
 
 
-def mirth_file_parser(filename):
+def mirth_file_parser(filename, date: int = 1, trait_rotatelog: bool = False):
     """
     Parses a Mirth log file and groups lines belonging to the same log entry.
     A new log entry starts with a line containing the log level and the timestamp.
     
     Args:
         filename (str): Path to the log file.
+        date (int): Date offset: 1 = all content, 0 = today, -1 = J-1, -x = J-X.
+        trait_rotatelog (bool): If True, extend parsing to rotated files ({filename}.x)
+                                that meet the date criteria.
         
     Returns:
         list[str]: A list of log entries, where each entry is a string (potentially multiline).
     """
+    import datetime
+    
     if not os.path.exists(filename):
         raise FileNotFoundError(f"Log file not found: {filename}")
         
-    entries = []
-    current_entry = []
-    
-    # Use utf-8 with replacement for invalid characters, fallback to latin-1 if needed
+    # Determine the target date and filter criteria if offset is <= 0
+    target_date = None
+    target_date_str = None
+    if date <= 0:
+        target_date = datetime.date.today() + datetime.timedelta(days=date)
+        target_date_str = target_date.strftime("%Y-%m-%d")
+        
+    # Get all candidate files to parse
+    files_to_check = [filename]
+    if trait_rotatelog:
+        dir_name = os.path.dirname(os.path.abspath(filename))
+        base_name = os.path.basename(filename)
+        if os.path.exists(dir_name):
+            for f in os.listdir(dir_name):
+                # Match logrotate files, e.g. mirth.log.1, mirth.log.2
+                if re.match(rf"^{re.escape(base_name)}\.\d+$", f):
+                    files_to_check.append(os.path.join(dir_name, f))
+                    
+    # Filter files using modification date (mtime)
+    valid_files = []
+    for filepath in files_to_check:
+        if not os.path.exists(filepath):
+            continue
+        if date <= 0 and target_date is not None:
+            try:
+                mtime = os.path.getmtime(filepath)
+                mtime_date = datetime.date.fromtimestamp(mtime)
+                # Skip files modified before the target date
+                if mtime_date < target_date:
+                    continue
+            except Exception:
+                pass
+        valid_files.append(filepath)
+        
+    # Sort files by modification date ascending so they are parsed in chronological order
     try:
-        with open(filename, 'r', encoding='utf-8', errors='replace') as f:
-            lines = f.readlines()
+        valid_files.sort(key=lambda x: os.path.getmtime(x))
     except Exception:
-        with open(filename, 'r', encoding='latin-1', errors='replace') as f:
-            lines = f.readlines()
-            
+        pass
+        
+    entries = []
     # Pattern matching log entry start: e.g. ERROR 2026-05-06 15:35:57.200 or INFO  2026-05-06 15:36:07.275
     # Standard format: LEVEL YYYY-MM-DD HH:MM:SS.SSS
     header_pattern = re.compile(r'^[A-Z]+\s+\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2}')
+    date_extractor = re.compile(r'^[A-Z]+\s+(\d{4}-\d{2}-\d{2})')
     
-    for line in lines:
-        if header_pattern.match(line):
-            if current_entry:
-                entries.append("".join(current_entry))
-                current_entry = []
-            current_entry.append(line)
-        else:
-            if current_entry:
+    for filepath in valid_files:
+        current_entry = []
+        try:
+            with open(filepath, 'r', encoding='utf-8', errors='replace') as f:
+                lines = f.readlines()
+        except Exception:
+            try:
+                with open(filepath, 'r', encoding='latin-1', errors='replace') as f:
+                    lines = f.readlines()
+            except Exception:
+                continue
+                
+        for line in lines:
+            if header_pattern.match(line):
+                if current_entry:
+                    should_append = True
+                    if date <= 0 and target_date_str is not None:
+                        m = date_extractor.match(current_entry[0])
+                        if not m or m.group(1) != target_date_str:
+                            should_append = False
+                    if should_append:
+                        entries.append("".join(current_entry))
+                    current_entry = []
                 current_entry.append(line)
             else:
-                # If file starts with lines that have no header, group them as the first entry
-                current_entry.append(line)
+                if current_entry:
+                    current_entry.append(line)
+                else:
+                    # If file starts with lines that have no header, group them as the first entry
+                    current_entry.append(line)
+                    
+        if current_entry:
+            should_append = True
+            if date <= 0 and target_date_str is not None:
+                m = date_extractor.match(current_entry[0])
+                if not m or m.group(1) != target_date_str:
+                    should_append = False
+            if should_append:
+                entries.append("".join(current_entry))
                 
-    if current_entry:
-        entries.append("".join(current_entry))
-        
     return entries
+
 
 def mirth_log_decoder(log_entry_str):
     """
@@ -226,31 +287,63 @@ if __name__ == '__main__':
                 table_str = tabulate(data, headers=headers, tablefmt="simple")
                 safe_print(table_str)
 
-    def display_statistics(filename):
+    def display_statistics(filename, date=1, trait_rotatelog=False):
         """
-        Reads a Mirth log file, parses and decodes its content, computes various 
+        Reads Mirth log file(s), parses and decodes their content, computes various 
         statistics, and displays them in beautifully formatted tables.
         
         Args:
             filename (str): Path to the log file.
+            date (int): Date offset: 1 = all content, 0 = today, -1 = J-1, -x = J-X.
+            trait_rotatelog (bool): If True, extend parsing to rotated files.
         """
         try:
-            raw_entries = mirth_file_parser(filename)
+            raw_entries = mirth_file_parser(filename, date=date, trait_rotatelog=trait_rotatelog)
         except Exception as e:
             print(f"Error parsing log file: {e}", file=sys.stderr)
             sys.exit(1)
             
         decoded_entries = [mirth_log_decoder(entry) for entry in raw_entries]
         
+        # Determine candidate files that were parsed
+        files_to_check = [filename]
+        if trait_rotatelog:
+            dir_name = os.path.dirname(os.path.abspath(filename))
+            base_name = os.path.basename(filename)
+            if os.path.exists(dir_name):
+                for f in os.listdir(dir_name):
+                    if re.match(rf"^{re.escape(base_name)}\.\d+$", f):
+                        files_to_check.append(os.path.join(dir_name, f))
+                        
+        target_date = None
+        if date <= 0:
+            target_date = datetime.date.today() + datetime.timedelta(days=date)
+            
+        valid_files = []
+        for filepath in files_to_check:
+            if not os.path.exists(filepath):
+                continue
+            if date <= 0 and target_date is not None:
+                try:
+                    mtime = os.path.getmtime(filepath)
+                    mtime_date = datetime.date.fromtimestamp(mtime)
+                    if mtime_date < target_date:
+                        continue
+                except Exception:
+                    pass
+            valid_files.append(filepath)
+            
         # 1. General Stats
-        file_size_kb = os.path.getsize(filename) / 1024
-        
-        # Count total lines
-        try:
-            with open(filename, 'r', encoding='utf-8', errors='ignore') as f:
-                total_lines = len(f.readlines())
-        except Exception:
-            total_lines = 0
+        total_size_bytes = 0
+        total_lines = 0
+        for filepath in valid_files:
+            try:
+                total_size_bytes += os.path.getsize(filepath)
+                with open(filepath, 'r', encoding='utf-8', errors='ignore') as f:
+                    total_lines += len(f.readlines())
+            except Exception:
+                pass
+        file_size_kb = total_size_bytes / 1024
             
         # File modification time
         try:
@@ -264,9 +357,14 @@ if __name__ == '__main__':
         oldest_msg = min(timestamps) if timestamps else "N/A"
         newest_msg = max(timestamps) if timestamps else "N/A"
         
+        if len(valid_files) == 1:
+            files_display = os.path.abspath(valid_files[0])
+        else:
+            files_display = f"{len(valid_files)} files (including rotated)"
+            
         general_stats = [
-            ["Log File", os.path.abspath(filename)],
-            ["File Size", f"{file_size_kb:.2f} KB"],
+            ["Log File(s) Analyzed", files_display],
+            ["File Size (Total)", f"{file_size_kb:.2f} KB"],
             ["File Modification Date", mtime_str],
             ["Total Raw Lines", total_lines],
             ["Parsed Log Entries", len(decoded_entries)],
@@ -440,13 +538,24 @@ if __name__ == '__main__':
             default=r"Ressources\mirth-exemple.log",
             help=r"Path to the Mirth log file (default: Ressources\mirth-exemple.log)"
         )
+        parser.add_argument(
+            "-d", "--date",
+            type=int,
+            default=1,
+            help="Date offset: 1 = all content, 0 = today, -1 = J-1, -x = J-X"
+        )
+        parser.add_argument(
+            "-r", "--trait-rotatelog",
+            action="store_true",
+            help="Extend parsing to logrotate files ({filename}.x)"
+        )
         args = parser.parse_args()
         
         if not os.path.exists(args.logfile):
             safe_print(f"Error: Log file '{args.logfile}' does not exist.")
             sys.exit(1)
             
-        display_statistics(args.logfile)
+        display_statistics(args.logfile, date=args.date, trait_rotatelog=args.trait_rotatelog)
 
     main()
 
