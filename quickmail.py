@@ -18,10 +18,10 @@ SMTP_PASSWORD = "***PASSWORD***"
 SENDER_ADDRESS = "ron06@free.fr"
 
 
-def sendmail(sujet: str, message: str, dest: str) -> bool:
+def sendmail(sujet: str, message: str, dest: str, html: str = None, attachment_name: str = None, attachment_content: str = None) -> bool:
     """Envoie un email en utilisant la configuration SMTP globale."""
-    # Construction du message
-    msg = MIMEMultipart()
+    # Construction du message - mixed car contient potentiellement une pièce jointe
+    msg = MIMEMultipart("mixed")
     msg["From"] = SENDER_ADDRESS
     msg["To"] = dest
     msg["Subject"] = sujet
@@ -33,7 +33,24 @@ def sendmail(sujet: str, message: str, dest: str) -> bool:
     msg["Message-ID"] = make_msgid()  # Génère un identifiant unique pour le mail
     # ---------------------------------------------
 
-    msg.attach(MIMEText(message, "plain", "utf-8"))
+    # Corps de l'e-mail (texte alternatif plain/html si html fourni)
+    if html:
+        body_part = MIMEMultipart("alternative")
+        body_part.attach(MIMEText(message, "plain", "utf-8"))
+        body_part.attach(MIMEText(html, "html", "utf-8"))
+        msg.attach(body_part)
+    else:
+        msg.attach(MIMEText(message, "plain", "utf-8"))
+
+    # Pièce jointe
+    if attachment_name and attachment_content:
+        attachment_part = MIMEText(attachment_content, "plain", "utf-8")
+        attachment_part.add_header(
+            "Content-Disposition",
+            "attachment",
+            filename=attachment_name
+        )
+        msg.attach(attachment_part)
 
     try:
         if USE_SSL:
