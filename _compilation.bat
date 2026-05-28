@@ -1,0 +1,52 @@
+@echo off
+setlocal ENABLEDELAYEDEXPANSION
+
+set PYTHON_EXE=python3.13
+echo [INFO] Python utilisé : %PYTHON_EXE%
+
+
+REM 1. Récupère la ligne "Location:"
+REM Récupère le chemin site-packages dans la variable LOCATION
+for /f "usebackq delims=" %%L in (`powershell -NoLogo -NoProfile -Command "%PYTHON_EXE% -m pip show pyinstaller | Select-String '^LOCATION' | %% { $_.ToString().Split(':',2)[1].Trim() }"`) do (
+    set "PKGROOT=%%L"
+)
+
+REM 2. Remonte d'un niveau pour être dans le dossier parent de site-packages
+REM PKGROOT = ...\Python3xx\site-packages
+REM On veut ...\Python3xx
+for /f "usebackq delims=" %%P in (`powershell -NoLogo -NoProfile -Command "Split-Path -Parent '%PKGROOT%'"`) do (
+    set "PKGROOT=%%P"
+)
+
+set "PYINSTALLER=%PKGROOT%\Scripts\pyinstaller.exe"
+
+REM Affiche le résultat
+echo PyInstaller devrait etre ici : "%PYINSTALLER%"
+REM Vérifie l'existence
+if exist "%PYINSTALLER%" (
+    echo [OK] pyinstaller.exe trouve.
+    %PYINSTALLER% --version
+) else (
+    echo [ERREUR] pyinstaller.exe introuvable. Installe-le avec :
+    echo     python3.13 -m pip install pyinstaller
+)
+
+
+REM ---- Installer les dépendances (optionnel si déjà installées) ----
+%PYTHON_EXE% -m pip install --upgrade pip
+%PYTHON_EXE% -m pip install -r requirements.txt
+
+REM ---- Compilation ----
+echo.
+echo [INFO] Compilation des scripts...
+%PYINSTALLER%  --onefile quickmail.py
+
+echo.
+echo [OK] Compilation terminee !
+
+REM ---- Copie des fichiers ----
+REM copy .\dist\quickmail.exe .\quickmail.exe
+
+pause
+
+:fin

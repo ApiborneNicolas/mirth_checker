@@ -1,0 +1,103 @@
+ERROR 2026-05-06 15:35:57.200 [Main Server Thread] com.mirth.connect.server.Mirth: Error establishing connection to database, retrying startup in 10000 milliseconds
+com.zaxxer.hikari.pool.HikariPool$PoolInitializationException: Failed to initialize pool: FATAL: authentification par mot de passe ?chou?e pour l'utilisateur  ? "admin" ?
+	at com.zaxxer.hikari.pool.HikariPool.checkFailFast(HikariPool.java:512) ~[HikariCP-2.5.1.jar:?]
+	at com.zaxxer.hikari.pool.HikariPool.<init>(HikariPool.java:105) ~[HikariCP-2.5.1.jar:?]
+	at com.zaxxer.hikari.HikariDataSource.getConnection(HikariDataSource.java:94) ~[HikariCP-2.5.1.jar:?]
+	at org.apache.ibatis.transaction.jdbc.JdbcTransaction.openConnection(JdbcTransaction.java:131) ~[mybatis-3.1.1.jar:3.1.1]
+	at org.apache.ibatis.transaction.jdbc.JdbcTransaction.getConnection(JdbcTransaction.java:58) ~[mybatis-3.1.1.jar:3.1.1]
+	at org.apache.ibatis.session.defaults.DefaultSqlSession.getConnection(DefaultSqlSession.java:220) ~[mybatis-3.1.1.jar:3.1.1]
+	at org.apache.ibatis.session.SqlSessionManager.getConnection(SqlSessionManager.java:221) ~[mybatis-3.1.1.jar:3.1.1]
+	at com.mirth.connect.server.Mirth.startup(Mirth.java:255) ~[mirth-server.jar:?]
+	at com.mirth.connect.server.Mirth.run(Mirth.java:168) ~[mirth-server.jar:?]
+Caused by: org.postgresql.util.PSQLException: FATAL: authentification par mot de passe ?chou?e pour l'utilisateur  ? "admin" ?
+	at org.postgresql.core.v3.ConnectionFactoryImpl.doAuthentication(ConnectionFactoryImpl.java:693) ~[postgresql-42.6.0.jar:42.6.0]
+	at org.postgresql.core.v3.ConnectionFactoryImpl.tryConnect(ConnectionFactoryImpl.java:203) ~[postgresql-42.6.0.jar:42.6.0]
+	at org.postgresql.core.v3.ConnectionFactoryImpl.openConnectionImpl(ConnectionFactoryImpl.java:258) ~[postgresql-42.6.0.jar:42.6.0]
+	at org.postgresql.core.ConnectionFactory.openConnection(ConnectionFactory.java:54) ~[postgresql-42.6.0.jar:42.6.0]
+	at org.postgresql.jdbc.PgConnection.<init>(PgConnection.java:263) ~[postgresql-42.6.0.jar:42.6.0]
+	at org.postgresql.Driver.makeConnection(Driver.java:443) ~[postgresql-42.6.0.jar:42.6.0]
+	at org.postgresql.Driver.connect(Driver.java:297) ~[postgresql-42.6.0.jar:42.6.0]
+	at com.zaxxer.hikari.util.DriverDataSource.getConnection(DriverDataSource.java:95) ~[HikariCP-2.5.1.jar:?]
+	at com.zaxxer.hikari.util.DriverDataSource.getConnection(DriverDataSource.java:101) ~[HikariCP-2.5.1.jar:?]
+	at com.zaxxer.hikari.pool.PoolBase.newConnection(PoolBase.java:341) ~[HikariCP-2.5.1.jar:?]
+	at com.zaxxer.hikari.pool.HikariPool.checkFailFast(HikariPool.java:506) ~[HikariCP-2.5.1.jar:?]
+	... 8 more
+ERROR 2026-05-06 15:36:07.274 [Main Server Thread] com.mirth.connect.server.Mirth: Error establishing connection to database, aborting startup. FATAL: authentification par mot de passe ?chou?e pour l'utilisateur  ? "admin" ?
+INFO  2026-05-06 15:36:07.275 [Shutdown Hook Thread] com.mirth.connect.server.Mirth: shutting down mirth due to normal request
+ERROR 2026-05-06 15:36:28.746 [Main Server Thread] com.mirth.connect.server.Mirth: Error establishing connection to database, retrying startup in 10000 milliseconds
+com.zaxxer.hikari.pool.HikariPool$PoolInitializationException: Failed to initialize pool: FATAL: authentification par mot de passe ?chou?e pour l'utilisateur  ? "admin" ?
+	at com.zaxxer.hikari.pool.HikariPool.checkFailFast(HikariPool.java:512) ~[HikariCP-2.5.1.jar:?]
+	at com.zaxxer.hikari.pool.HikariPool.<init>(HikariPool.java:105) ~[HikariCP-2.5.1.jar:?]
+	at com.zaxxer.hikari.HikariDataSource.getConnection(HikariDataSource.java:94) ~[HikariCP-2.5.1.jar:?]
+	at org.apache.ibatis.transaction.jdbc.JdbcTransaction.openConnection(JdbcTransaction.java:131) ~[mybatis-3.1.1.jar:3.1.1]
+	at org.apache.ibatis.transaction.jdbc.JdbcTransaction.getConnection(JdbcTransaction.java:58) ~[mybatis-3.1.1.jar:3.1.1]
+	at org.apache.ibatis.session.defaults.DefaultSqlSession.getConnection(DefaultSqlSession.java:220) ~[mybatis-3.1.1.jar:3.1.1]
+	at org.apache.ibatis.session.SqlSessionManager.getConnection(SqlSessionManager.java:221) ~[mybatis-3.1.1.jar:3.1.1]
+	at com.mirth.connect.server.Mirth.startup(Mirth.java:255) ~[mirth-server.jar:?]
+	at com.mirth.connect.server.Mirth.run(Mirth.java:168) ~[mirth-server.jar:?]
+Caused by: org.postgresql.util.PSQLException: FATAL: authentification par mot de passe ?chou?e pour l'utilisateur  ? "admin" ?
+	at org.postgresql.core.v3.ConnectionFactoryImpl.doAuthentication(ConnectionFactoryImpl.java:693) ~[postgresql-42.6.0.jar:42.6.0]
+	at org.postgresql.core.v3.ConnectionFactoryImpl.tryConnect(ConnectionFactoryImpl.java:203) ~[postgresql-42.6.0.jar:42.6.0]
+	at org.postgresql.core.v3.ConnectionFactoryImpl.openConnectionImpl(ConnectionFactoryImpl.java:258) ~[postgresql-42.6.0.jar:42.6.0]
+	at org.postgresql.core.ConnectionFactory.openConnection(ConnectionFactory.java:54) ~[postgresql-42.6.0.jar:42.6.0]
+	at org.postgresql.jdbc.PgConnection.<init>(PgConnection.java:263) ~[postgresql-42.6.0.jar:42.6.0]
+	at org.postgresql.Driver.makeConnection(Driver.java:443) ~[postgresql-42.6.0.jar:42.6.0]
+	at org.postgresql.Driver.connect(Driver.java:297) ~[postgresql-42.6.0.jar:42.6.0]
+	at com.zaxxer.hikari.util.DriverDataSource.getConnection(DriverDataSource.java:95) ~[HikariCP-2.5.1.jar:?]
+	at com.zaxxer.hikari.util.DriverDataSource.getConnection(DriverDataSource.java:101) ~[HikariCP-2.5.1.jar:?]
+	at com.zaxxer.hikari.pool.PoolBase.newConnection(PoolBase.java:341) ~[HikariCP-2.5.1.jar:?]
+	at com.zaxxer.hikari.pool.HikariPool.checkFailFast(HikariPool.java:506) ~[HikariCP-2.5.1.jar:?]
+	... 8 more
+ERROR 2026-05-06 15:36:38.824 [Main Server Thread] com.mirth.connect.server.Mirth: Error establishing connection to database, retrying startup in 10000 milliseconds
+com.zaxxer.hikari.pool.HikariPool$PoolInitializationException: Failed to initialize pool: FATAL: authentification par mot de passe ?chou?e pour l'utilisateur  ? "admin" ?
+	at com.zaxxer.hikari.pool.HikariPool.checkFailFast(HikariPool.java:512) ~[HikariCP-2.5.1.jar:?]
+	at com.zaxxer.hikari.pool.HikariPool.<init>(HikariPool.java:105) ~[HikariCP-2.5.1.jar:?]
+	at com.zaxxer.hikari.HikariDataSource.getConnection(HikariDataSource.java:94) ~[HikariCP-2.5.1.jar:?]
+	at org.apache.ibatis.transaction.jdbc.JdbcTransaction.openConnection(JdbcTransaction.java:131) ~[mybatis-3.1.1.jar:3.1.1]
+	at org.apache.ibatis.transaction.jdbc.JdbcTransaction.getConnection(JdbcTransaction.java:58) ~[mybatis-3.1.1.jar:3.1.1]
+	at org.apache.ibatis.session.defaults.DefaultSqlSession.getConnection(DefaultSqlSession.java:220) ~[mybatis-3.1.1.jar:3.1.1]
+	at org.apache.ibatis.session.SqlSessionManager.getConnection(SqlSessionManager.java:221) ~[mybatis-3.1.1.jar:3.1.1]
+	at com.mirth.connect.server.Mirth.startup(Mirth.java:255) ~[mirth-server.jar:?]
+	at com.mirth.connect.server.Mirth.run(Mirth.java:168) ~[mirth-server.jar:?]
+Caused by: org.postgresql.util.PSQLException: FATAL: authentification par mot de passe ?chou?e pour l'utilisateur  ? "admin" ?
+	at org.postgresql.core.v3.ConnectionFactoryImpl.doAuthentication(ConnectionFactoryImpl.java:693) ~[postgresql-42.6.0.jar:42.6.0]
+	at org.postgresql.core.v3.ConnectionFactoryImpl.tryConnect(ConnectionFactoryImpl.java:203) ~[postgresql-42.6.0.jar:42.6.0]
+	at org.postgresql.core.v3.ConnectionFactoryImpl.openConnectionImpl(ConnectionFactoryImpl.java:258) ~[postgresql-42.6.0.jar:42.6.0]
+	at org.postgresql.core.ConnectionFactory.openConnection(ConnectionFactory.java:54) ~[postgresql-42.6.0.jar:42.6.0]
+	at org.postgresql.jdbc.PgConnection.<init>(PgConnection.java:263) ~[postgresql-42.6.0.jar:42.6.0]
+	at org.postgresql.Driver.makeConnection(Driver.java:443) ~[postgresql-42.6.0.jar:42.6.0]
+	at org.postgresql.Driver.connect(Driver.java:297) ~[postgresql-42.6.0.jar:42.6.0]
+	at com.zaxxer.hikari.util.DriverDataSource.getConnection(DriverDataSource.java:95) ~[HikariCP-2.5.1.jar:?]
+	at com.zaxxer.hikari.util.DriverDataSource.getConnection(DriverDataSource.java:101) ~[HikariCP-2.5.1.jar:?]
+	at com.zaxxer.hikari.pool.PoolBase.newConnection(PoolBase.java:341) ~[HikariCP-2.5.1.jar:?]
+	at com.zaxxer.hikari.pool.HikariPool.checkFailFast(HikariPool.java:506) ~[HikariCP-2.5.1.jar:?]
+	... 8 more
+ERROR 2026-05-06 15:36:48.911 [Main Server Thread] com.mirth.connect.server.Mirth: Error establishing connection to database, aborting startup. FATAL: authentification par mot de passe ?chou?e pour l'utilisateur  ? "admin" ?
+INFO  2026-05-06 15:36:48.912 [Shutdown Hook Thread] com.mirth.connect.server.Mirth: shutting down mirth due to normal request
+INFO  2026-05-06 15:40:25.056 [Main Server Thread] com.mirth.connect.server.Mirth: Mirth Connect 4.5.2 (Built on September 6, 2024) server successfully started.
+INFO  2026-05-06 15:40:25.070 [Main Server Thread] com.mirth.connect.server.Mirth: This product was developed by NextGen Healthcare (https://www.nextgen.com) and its contributors (c)2005-2024.
+INFO  2026-05-06 15:40:25.070 [Main Server Thread] com.mirth.connect.server.Mirth: Running Java HotSpot(TM) 64-Bit Server VM 1.8.0_461 on Windows 11 (10.0, amd64), postgres, with charset windows-1252.
+INFO  2026-05-06 15:40:28.935 [Main Server Thread] com.mirth.connect.server.Mirth: Web server running at http://192.168.1.23:8080/ and https://192.168.1.23:8443/
+INFO  2026-05-11 09:14:26.130 [Shutdown Hook Thread] com.mirth.connect.server.Mirth: shutting down mirth due to normal request
+INFO  2026-05-11 09:15:26.988 [Main Server Thread] com.mirth.connect.server.Mirth: Mirth Connect 4.5.2 (Built on September 6, 2024) server successfully started.
+INFO  2026-05-11 09:15:26.998 [Main Server Thread] com.mirth.connect.server.Mirth: This product was developed by NextGen Healthcare (https://www.nextgen.com) and its contributors (c)2005-2024.
+INFO  2026-05-11 09:15:27.001 [Main Server Thread] com.mirth.connect.server.Mirth: Running Java HotSpot(TM) 64-Bit Server VM 1.8.0_461 on Windows 11 (10.0, amd64), postgres, with charset windows-1252.
+INFO  2026-05-11 09:15:28.715 [Main Server Thread] com.mirth.connect.server.Mirth: Web server running at http://192.168.1.23:8080/ and https://192.168.1.23:8443/
+INFO  2026-05-15 17:55:37.079 [Shutdown Hook Thread] com.mirth.connect.server.Mirth: shutting down mirth due to normal request
+INFO  2026-05-15 17:56:30.036 [Main Server Thread] com.mirth.connect.server.Mirth: Mirth Connect 4.5.2 (Built on September 6, 2024) server successfully started.
+INFO  2026-05-15 17:56:30.046 [Main Server Thread] com.mirth.connect.server.Mirth: This product was developed by NextGen Healthcare (https://www.nextgen.com) and its contributors (c)2005-2024.
+INFO  2026-05-15 17:56:30.046 [Main Server Thread] com.mirth.connect.server.Mirth: Running Java HotSpot(TM) 64-Bit Server VM 1.8.0_461 on Windows 11 (10.0, amd64), postgres, with charset windows-1252.
+INFO  2026-05-15 17:56:30.824 [Main Server Thread] com.mirth.connect.server.Mirth: Web server running at http://192.168.1.58:8080/ and https://192.168.1.58:8443/
+INFO  2026-05-15 17:57:13.134 [Shutdown Hook Thread] com.mirth.connect.server.Mirth: shutting down mirth due to normal request
+INFO  2026-05-15 17:58:59.626 [Main Server Thread] com.mirth.connect.server.Mirth: Mirth Connect 4.5.2 (Built on September 6, 2024) server successfully started.
+INFO  2026-05-15 17:58:59.640 [Main Server Thread] com.mirth.connect.server.Mirth: This product was developed by NextGen Healthcare (https://www.nextgen.com) and its contributors (c)2005-2024.
+INFO  2026-05-15 17:58:59.640 [Main Server Thread] com.mirth.connect.server.Mirth: Running Java HotSpot(TM) 64-Bit Server VM 1.8.0_461 on Windows 11 (10.0, amd64), postgres, with charset windows-1252.
+INFO  2026-05-15 17:59:01.174 [Main Server Thread] com.mirth.connect.server.Mirth: Web server running at http://192.168.1.58:8080/ and https://192.168.1.58:8443/
+INFO  2026-05-15 17:59:01.438 [Shutdown Hook Thread] com.mirth.connect.server.Mirth: shutting down mirth due to normal request
+INFO  2026-05-18 09:10:56.706 [Main Server Thread] com.mirth.connect.server.Mirth: Mirth Connect 4.5.2 (Built on September 6, 2024) server successfully started.
+INFO  2026-05-18 09:10:56.730 [Main Server Thread] com.mirth.connect.server.Mirth: This product was developed by NextGen Healthcare (https://www.nextgen.com) and its contributors (c)2005-2024.
+INFO  2026-05-18 09:10:56.732 [Main Server Thread] com.mirth.connect.server.Mirth: Running Java HotSpot(TM) 64-Bit Server VM 1.8.0_461 on Windows 11 (10.0, amd64), postgres, with charset windows-1252.
+INFO  2026-05-18 09:10:58.819 [Main Server Thread] com.mirth.connect.server.Mirth: Web server running at http://192.168.1.23:8080/ and https://192.168.1.23:8443/
+INFO  2026-05-27 13:35:39.424 [Destination Filter/Transformer JavaScript Task on EASYDOCT-XPLORE (cc86a7e5-8d1a-4823-ab8f-965b03533ec1), ARWAN-XPLORE (1) < pool-1-thread-1] transformer: Voici le lieu : 
+INFO  2026-05-27 13:35:39.432 [Destination Filter/Transformer JavaScript Task on EASYDOCT-XPLORE (cc86a7e5-8d1a-4823-ab8f-965b03533ec1), ARWAN-XPLORE (1) < pool-1-thread-1] transformer: Voici le code Examen : 136
+INFO  2026-05-27 13:35:39.437 [Destination Filter/Transformer JavaScript Task on EASYDOCT-XPLORE (cc86a7e5-8d1a-4823-ab8f-965b03533ec1), ARWAN-XPLORE (1) < pool-1-thread-1] transformer: Lieu différent ? aucune modification appliquée.
