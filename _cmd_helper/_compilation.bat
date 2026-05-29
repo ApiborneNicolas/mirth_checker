@@ -45,12 +45,13 @@ echo.
 echo [INFO] Compilation des scripts...
 %PYINSTALLER%  --onefile quickmail.py
 %PYINSTALLER%  --onefile mirth_logs_parser.py
+%PYINSTALLER%  --onefile system_state.py
 
 echo.
 echo [OK] Compilation terminee !
 
 REM ---- Copie des fichiers ----
-REM copy .\dist\quickmail.exe .\quickmail.exe
+REM copy .\dist\*.exe .\*.exe
 
 pause
 
