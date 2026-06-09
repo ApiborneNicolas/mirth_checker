@@ -5,8 +5,26 @@ REM Go to the root directory
 cd /d "%~dp0.."
 
 
-set PYTHON_EXE=python3.13
-echo [INFO] Python utilisé : %PYTHON_EXE%
+REM ---- Détection de la version de Python installée ----
+set "PYTHON_EXE="
+where python3 >nul 2>nul
+if %ERRORLEVEL% equ 0 (
+    set "PYTHON_EXE=python3"
+) else (
+    REM Test de la commande python si python3 n'existe pas
+    where python >nul 2>nul
+    if %ERRORLEVEL% equ 0 (
+        set "PYTHON_EXE=python"
+    )
+)
+
+if "%PYTHON_EXE%"=="" (
+    echo [ERREUR] Python n'est pas installe ou n'est pas dans le PATH.
+    pause
+    goto fin
+)
+
+echo [INFO] Python détecté et utilisé : %PYTHON_EXE%
 
 
 REM 1. Récupère la ligne "Location:"
@@ -32,7 +50,7 @@ if exist "%PYINSTALLER%" (
     %PYINSTALLER% --version
 ) else (
     echo [ERREUR] pyinstaller.exe introuvable. Installe-le avec :
-    echo     python3.13 -m pip install pyinstaller
+    echo     %PYTHON_EXE% -m pip install pyinstaller
 )
 
 
