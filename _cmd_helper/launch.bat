@@ -29,9 +29,12 @@ echo.
 
 set count=0
 for %%f in (*.py) do (
-    set /a count+=1
-    set "file_!count!=%%f"
-    echo  [!count!] %%f
+    set "filename=%%f"
+    if "!filename:~0,1!" neq "." (
+        set /a count+=1
+        set "file_!count!=%%f"
+        echo  [!count!] %%f
+    )
 )
 echo  [q] Quitter
 echo.

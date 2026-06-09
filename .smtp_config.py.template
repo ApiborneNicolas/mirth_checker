@@ -1,0 +1,6 @@
+SMTP_SERVER = "smtp.free.fr"
+SMTP_PORT = 587
+USE_SSL = False
+SMTP_USER = "ton_utilisateur"
+SMTP_PASSWORD = "ton_mot_de_passe"
+SENDER_ADDRESS = "ton_adresse@free.fr"

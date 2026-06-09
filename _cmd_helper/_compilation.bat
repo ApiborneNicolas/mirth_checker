@@ -40,11 +40,17 @@ REM ---- Installer les dépendances (optionnel si déjà installées) ----
 %PYTHON_EXE% -m pip install --upgrade pip
 %PYTHON_EXE% -m pip install -r requirements.txt
 
+REM ---- Verification de la configuration SMTP ----
+if not exist ".smtp_config.py" (
+    echo [INFO] Creation de .smtp_config.py a partir de .smtp_config.py.template...
+    copy ".smtp_config.py.template" ".smtp_config.py"
+)
+
 REM ---- Compilation ----
 echo.
 echo [INFO] Compilation des scripts...
-%PYINSTALLER%  --onefile quickmail.py
-%PYINSTALLER%  --onefile mirth_logs_parser.py
+%PYINSTALLER%  --onefile --add-data ".smtp_config.py;." quickmail.py
+%PYINSTALLER%  --onefile --add-data ".smtp_config.py;." mirth_logs_parser.py
 %PYINSTALLER%  --onefile system_state.py
 
 echo.
