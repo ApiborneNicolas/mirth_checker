@@ -1,0 +1,508 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Mirth Checker — Base de données</title>
+    <style>
+        :root {
+            --bg: #0f172a;
+            --panel: #1e293b;
+            --panel-2: #334155;
+            --border: #293548;
+            --text: #e2e8f0;
+            --muted: #94a3b8;
+            --accent: #38bdf8;
+            --accent-2: #a78bfa;
+            --ok: #22c55e;
+            --err: #ef4444;
+            --warn: #f59e0b;
+        }
+        * { box-sizing: border-box; }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Arial, sans-serif;
+            background: var(--bg);
+            color: var(--text);
+            margin: 0;
+            padding: 24px;
+        }
+        header {
+            display: flex; flex-wrap: wrap; align-items: center;
+            justify-content: space-between; gap: 12px; margin-bottom: 18px;
+        }
+        h1 { font-size: 22px; margin: 0; font-weight: 600; }
+        nav a { color: var(--accent); font-size: 14px; text-decoration: none; margin-left: 16px; }
+        nav a:hover { text-decoration: underline; }
+        .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 18px; align-items: start; }
+        @media (max-width: 900px) { .grid { grid-template-columns: 1fr; } }
+        .panel {
+            background: var(--panel);
+            border: 1px solid var(--border);
+            border-radius: 10px;
+            padding: 18px;
+            margin-bottom: 18px;
+        }
+        .panel h2 {
+            font-size: 15px; margin: 0 0 14px; font-weight: 600;
+            text-transform: uppercase; letter-spacing: .04em; color: var(--muted);
+            display: flex; align-items: center; gap: 8px;
+        }
+        .meta { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 10px; }
+        .meta .cell { background: var(--panel-2); border-radius: 8px; padding: 11px 13px; }
+        .meta .k { font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: .03em; }
+        .meta .v { font-size: 18px; font-weight: 600; margin-top: 4px; word-break: break-word; }
+        .meta .v small { font-size: 12px; color: var(--muted); font-weight: 400; }
+        table { width: 100%; border-collapse: collapse; margin-top: 6px; font-size: 13px; }
+        th, td { text-align: left; padding: 7px 10px; border-bottom: 1px solid var(--border); }
+        th { color: var(--muted); font-weight: 600; text-transform: uppercase; font-size: 11px; letter-spacing: .03em; }
+        td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
+        .path {
+            font-family: "Cascadia Code", Consolas, monospace; font-size: 12px;
+            color: #7dd3fc; word-break: break-all; background: #0b1220;
+            border: 1px solid var(--border); border-radius: 6px; padding: 8px 10px; margin-top: 4px;
+        }
+        label { font-size: 13px; color: var(--muted); display: block; margin-bottom: 5px; }
+        input[type=number], input[type=file] {
+            background: var(--panel-2); color: var(--text);
+            border: 1px solid #475569; border-radius: 6px;
+            padding: 8px 11px; font-size: 14px; width: 100%; font-family: inherit;
+        }
+        input[type=file] { padding: 6px 8px; cursor: pointer; }
+        .field { margin-bottom: 14px; }
+        .row { display: flex; gap: 10px; align-items: flex-end; flex-wrap: wrap; }
+        .row .field { flex: 1; margin-bottom: 0; min-width: 120px; }
+        button {
+            background: var(--panel-2); color: var(--text);
+            border: 1px solid #475569; border-radius: 6px;
+            padding: 8px 14px; font-size: 14px; cursor: pointer; white-space: nowrap;
+        }
+        button:hover:not(:disabled) { background: #475569; }
+        button:disabled { opacity: .5; cursor: not-allowed; }
+        button.primary { background: var(--accent); color: #06243a; border-color: var(--accent); font-weight: 600; }
+        button.primary:hover:not(:disabled) { background: #7dd3fc; }
+        button.danger { background: rgba(239,68,68,.15); color: #fca5a5; border-color: #7f1d1d; font-weight: 600; }
+        button.danger:hover:not(:disabled) { background: rgba(239,68,68,.28); }
+        button.warn { background: rgba(245,158,11,.15); color: #fbbf24; border-color: #78350f; }
+        button.warn:hover:not(:disabled) { background: rgba(245,158,11,.28); }
+        .op-block { padding: 13px 0; border-bottom: 1px solid var(--border); }
+        .op-block:last-child { border-bottom: none; padding-bottom: 0; }
+        .op-block:first-of-type { padding-top: 0; }
+        .op-title { font-size: 14px; font-weight: 600; margin-bottom: 4px; }
+        .op-desc { font-size: 12px; color: var(--muted); margin-bottom: 10px; line-height: 1.5; }
+        .toolbar { display: flex; gap: 8px; flex-wrap: wrap; }
+        .badge {
+            display: inline-block; font-size: 11px; font-weight: 700; padding: 2px 9px;
+            border-radius: 20px; vertical-align: middle;
+        }
+        .b-ok { background: rgba(34,197,94,.18); color: #4ade80; }
+        .b-err { background: rgba(239,68,68,.18); color: #f87171; }
+        .b-warn { background: rgba(245,158,11,.18); color: #fbbf24; }
+        .b-muted { background: var(--panel-2); color: var(--muted); }
+        .console {
+            background: #0b1220; border: 1px solid var(--border); border-radius: 8px;
+            padding: 12px 14px; font-family: "Cascadia Code", Consolas, monospace;
+            font-size: 12.5px; line-height: 1.6; max-height: 260px; overflow: auto;
+            white-space: pre-wrap; word-break: break-word;
+        }
+        .log-line { margin: 0; }
+        .log-time { color: var(--muted); }
+        .log-ok { color: #4ade80; }
+        .log-err { color: #f87171; }
+        .log-info { color: #7dd3fc; }
+        .gauge-wrap { margin-top: 10px; }
+        .gauge-track { background: var(--panel-2); border-radius: 6px; height: 10px; overflow: hidden; }
+        .gauge-fill { height: 100%; background: var(--warn); transition: width .4s; }
+        .hint { font-size: 12px; color: var(--muted); margin-top: 8px; }
+        footer { font-size: 12px; color: var(--muted); text-align: center; margin-top: 8px; }
+        .dot { display: inline-block; width: 9px; height: 9px; border-radius: 50%; margin-right: 5px; }
+        .pulse { animation: pulse 2s infinite; }
+        @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:.4} }
+    </style>
+</head>
+<body>
+    <header>
+        <h1>🗄️ Base de données — Mirth Checker</h1>
+        <nav>
+            <a href="statistiques.html">📊 Statistiques</a>
+            <a href="api.html">🧪 Testeur d'API</a>
+            <button id="refresh" class="primary" style="margin-left:16px;">↻ Rafraîchir</button>
+        </nav>
+    </header>
+
+    <!-- ============== ÉTAT DE LA BASE (pleine largeur) ============== -->
+    <div class="panel">
+        <h2>État de la base <span id="badge-state" class="badge b-muted">—</span></h2>
+        <div class="meta" id="db-cards">
+            <div class="cell"><div class="k">Taille fichier</div><div class="v" id="m-size">—</div></div>
+            <div class="cell"><div class="k">Relevés</div><div class="v" id="m-rows">—</div></div>
+            <div class="cell"><div class="k">Journal WAL</div><div class="v" id="m-wal">—</div></div>
+            <div class="cell"><div class="k">Mode journal</div><div class="v" id="m-mode">—</div></div>
+            <div class="cell"><div class="k">Plus ancien</div><div class="v" id="m-oldest">—</div></div>
+            <div class="cell"><div class="k">Plus récent</div><div class="v" id="m-newest">—</div></div>
+        </div>
+        <div class="gauge-wrap">
+            <label>Fragmentation (espace libre dans le fichier) — <span id="frag-label">—</span></label>
+            <div class="gauge-track"><div class="gauge-fill" id="frag-fill" style="width:0%"></div></div>
+        </div>
+        <div class="hint">Fichier :</div>
+        <div class="path" id="m-path">—</div>
+    </div>
+
+    <div class="grid">
+        <!-- ============== COLONNE GAUCHE : ÉTAT ============== -->
+        <div>
+            <div class="panel">
+                <h2>Tables</h2>
+                <table>
+                    <thead><tr><th>Table</th><th class="num">Lignes</th></tr></thead>
+                    <tbody id="tables-body">
+                        <tr><td colspan="2" style="color:var(--muted)">Chargement…</td></tr>
+                    </tbody>
+                </table>
+                <div class="hint" id="pages-hint">—</div>
+            </div>
+
+            <div class="panel">
+                <h2>Intégrité</h2>
+                <div class="op-desc">Vérifie la cohérence interne de la base (PRAGMA integrity_check).</div>
+                <div class="toolbar">
+                    <button id="btn-integrity">🔍 Vérifier l'intégrité</button>
+                    <span id="integrity-result" class="badge b-muted" style="align-self:center;display:none;"></span>
+                </div>
+            </div>
+        </div>
+
+        <!-- ============== COLONNE DROITE : OPÉRATIONS ============== -->
+        <div>
+            <div class="panel">
+                <h2>Extraction & sauvegarde</h2>
+
+                <div class="op-block">
+                    <div class="op-title">Télécharger la base (.db)</div>
+                    <div class="op-desc">Copie cohérente du fichier SQLite (checkpoint WAL inclus). Idéal pour une sauvegarde complète.</div>
+                    <div class="toolbar">
+                        <button id="btn-export-db" class="primary">⬇ Télécharger le .db</button>
+                        <button id="btn-export-csv">⬇ Exporter les relevés (CSV)</button>
+                    </div>
+                </div>
+            </div>
+
+            <div class="panel">
+                <h2>Importer une base</h2>
+                <div class="op-desc">
+                    Remplace la base actuelle par un fichier SQLite (<code>.db</code>). Le fichier est
+                    validé (en-tête, intégrité, table <code>metrics</code>) avant remplacement, et
+                    l'ancienne base est sauvegardée en <code>.bak</code>.
+                </div>
+                <div class="field">
+                    <label for="import-file">Fichier SQLite à importer</label>
+                    <input type="file" id="import-file" accept=".db,.sqlite,.sqlite3,application/x-sqlite3">
+                </div>
+                <div class="toolbar">
+                    <button id="btn-import" class="warn" disabled>⬆ Importer & remplacer</button>
+                </div>
+                <div class="hint">⚠ Les relevés actuels seront remplacés par ceux du fichier importé.</div>
+            </div>
+
+            <div class="panel">
+                <h2>Maintenance</h2>
+
+                <div class="op-block">
+                    <div class="op-title">Défragmenter (VACUUM)</div>
+                    <div class="op-desc">Compacte le fichier et récupère l'espace libre laissé par les suppressions.</div>
+                    <div class="toolbar">
+                        <button id="btn-vacuum">🗜 Défragmenter</button>
+                    </div>
+                </div>
+
+                <div class="op-block">
+                    <div class="op-title">Purger l'historique</div>
+                    <div class="op-desc">Supprime les relevés plus anciens que le nombre de jours indiqué.</div>
+                    <div class="row">
+                        <div class="field">
+                            <label for="purge-days">Conserver les N derniers jours</label>
+                            <input type="number" id="purge-days" value="30" min="0">
+                        </div>
+                        <button id="btn-purge" class="warn">🧹 Purger</button>
+                    </div>
+                </div>
+
+                <div class="op-block">
+                    <div class="op-title">Réinitialiser la base</div>
+                    <div class="op-desc">Supprime <b>tous</b> les relevés et recompacte la base (le schéma est conservé). Irréversible.</div>
+                    <div class="toolbar">
+                        <button id="btn-reset" class="danger">⨯ Réinitialiser</button>
+                    </div>
+                </div>
+            </div>
+
+            <div class="panel">
+                <h2>Journal des opérations</h2>
+                <div class="console" id="console"><span class="log-info">En attente d'une opération…</span></div>
+            </div>
+        </div>
+    </div>
+
+    <footer>
+        <span id="foot-status"><span class="dot pulse" style="background:var(--ok)"></span>Connecté</span>
+        — Supervision de <code>checker_history.db</code>
+    </footer>
+
+<script>
+const API = "";              // même origine que la page
+const $ = id => document.getElementById(id);
+
+// ----------------------------------------------------------------------
+// Utilitaires
+// ----------------------------------------------------------------------
+function humanSize(bytes) {
+    if (bytes === null || bytes === undefined) return "—";
+    if (bytes < 1024) return bytes + " o";
+    if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + " Ko";
+    if (bytes < 1024 * 1024 * 1024) return (bytes / (1024 * 1024)).toFixed(2) + " Mo";
+    return (bytes / (1024 * 1024 * 1024)).toFixed(2) + " Go";
+}
+
+function log(msg, kind = "info") {
+    const c = $("console");
+    if (c.dataset.fresh !== "1") { c.innerHTML = ""; c.dataset.fresh = "1"; }
+    const time = new Date().toLocaleTimeString("fr-FR");
+    const line = document.createElement("div");
+    line.className = "log-line";
+    line.innerHTML = `<span class="log-time">${time}</span> ` +
+        `<span class="log-${kind}">${msg}</span>`;
+    c.appendChild(line);
+    c.scrollTop = c.scrollHeight;
+}
+
+function setFoot(ok, msg) {
+    $("foot-status").innerHTML = ok
+        ? '<span class="dot pulse" style="background:var(--ok)"></span>Connecté'
+        : '<span class="dot" style="background:var(--err)"></span>Hors ligne : ' + msg;
+}
+
+// Verrouille les boutons pendant une opération (évite les doubles clics).
+function busy(on) {
+    document.querySelectorAll("button").forEach(b => {
+        if (b.id !== "refresh") b.disabled = on;
+    });
+    if (!on) $("btn-import").disabled = !$("import-file").files.length;
+}
+
+async function postJson(url, body) {
+    const opts = { method: "POST" };
+    if (body !== undefined) {
+        opts.headers = { "Content-Type": "application/json" };
+        opts.body = JSON.stringify(body);
+    }
+    const r = await fetch(API + url, opts);
+    const data = await r.json().catch(() => ({}));
+    if (!r.ok) throw new Error(data.error || ("HTTP " + r.status));
+    return data;
+}
+
+// ----------------------------------------------------------------------
+// Chargement de l'état de la base
+// ----------------------------------------------------------------------
+async function loadInfo() {
+    try {
+        const r = await fetch(API + "/api/db/info");
+        if (!r.ok) throw new Error("HTTP " + r.status);
+        const d = await r.json();
+        renderInfo(d);
+        setFoot(true);
+    } catch (e) {
+        setFoot(false, e.message);
+        $("badge-state").className = "badge b-err";
+        $("badge-state").textContent = "Hors ligne";
+    }
+}
+
+function renderInfo(d) {
+    const badge = $("badge-state");
+    if (!d.exists) {
+        badge.className = "badge b-err"; badge.textContent = "Absente";
+    } else {
+        badge.className = "badge b-ok"; badge.textContent = "Présente";
+    }
+
+    $("m-size").innerHTML = humanSize(d.file_size_bytes) +
+        ` <small>(${d.page_count ?? "?"} pages)</small>`;
+    $("m-rows").innerHTML = (d.metrics_rows ?? 0).toLocaleString("fr-FR") +
+        ` <small>${d.metrics_valid ?? 0} relevés · ${d.metrics_events ?? 0} évts</small>`;
+    $("m-wal").textContent = humanSize(d.wal_size_bytes);
+    $("m-mode").textContent = (d.journal_mode || "—").toUpperCase();
+    $("m-oldest").innerHTML = d.oldest ? `<small>${d.oldest}</small>` : "—";
+    $("m-newest").innerHTML = d.newest ? `<small>${d.newest}</small>` : "—";
+    $("m-path").textContent = d.path || "—";
+
+    // Jauge de fragmentation
+    const frag = d.fragmentation_percent || 0;
+    $("frag-fill").style.width = Math.min(frag, 100) + "%";
+    $("frag-fill").style.background = frag > 25 ? "var(--err)" : frag > 10 ? "var(--warn)" : "var(--ok)";
+    $("frag-label").textContent = frag.toFixed(2) + " %  (" + humanSize(d.free_bytes) + " libres)";
+
+    // Tables
+    const tb = $("tables-body");
+    tb.innerHTML = "";
+    if (!d.tables || !d.tables.length) {
+        tb.innerHTML = '<tr><td colspan="2" style="color:var(--muted)">Aucune table.</td></tr>';
+    } else {
+        d.tables.forEach(t => {
+            const tr = document.createElement("tr");
+            tr.innerHTML = `<td>${t.name}</td>` +
+                `<td class="num">${t.rows === null ? "—" : t.rows.toLocaleString("fr-FR")}</td>`;
+            tb.appendChild(tr);
+        });
+    }
+    $("pages-hint").textContent =
+        `Page : ${humanSize(d.page_size)} · Pages libres : ${d.freelist_count ?? "?"} · ` +
+        `Schéma v${d.schema_version ?? "?"} · Modifié : ${d.modified || "—"}`;
+}
+
+// ----------------------------------------------------------------------
+// Téléchargement d'un endpoint (déclenche le navigateur)
+// ----------------------------------------------------------------------
+async function download(url, label) {
+    busy(true);
+    log(`Téléchargement : ${label}…`, "info");
+    try {
+        const r = await fetch(API + url);
+        if (!r.ok) {
+            const err = await r.json().catch(() => ({}));
+            throw new Error(err.error || ("HTTP " + r.status));
+        }
+        const blob = await r.blob();
+        // Récupère le nom de fichier proposé par le serveur.
+        const cd = r.headers.get("Content-Disposition") || "";
+        const match = cd.match(/filename="?([^"]+)"?/);
+        const name = match ? match[1] : "export.bin";
+        const a = document.createElement("a");
+        a.href = URL.createObjectURL(blob);
+        a.download = name;
+        document.body.appendChild(a);
+        a.click();
+        a.remove();
+        setTimeout(() => URL.revokeObjectURL(a.href), 2000);
+        log(`✓ ${label} téléchargé (${humanSize(blob.size)}) → ${name}`, "ok");
+    } catch (e) {
+        log(`✗ ${label} : ${e.message}`, "err");
+    } finally {
+        busy(false);
+    }
+}
+
+// ----------------------------------------------------------------------
+// Opérations de maintenance
+// ----------------------------------------------------------------------
+async function doVacuum() {
+    busy(true);
+    log("Défragmentation (VACUUM) en cours…", "info");
+    try {
+        const d = await postJson("/api/db/vacuum");
+        log(`✓ Défragmentée. ${humanSize(d.size_before_bytes)} → ${humanSize(d.size_after_bytes)} ` +
+            `(${humanSize(d.reclaimed_bytes)} récupérés)`, "ok");
+        await loadInfo();
+    } catch (e) {
+        log("✗ VACUUM : " + e.message, "err");
+    } finally { busy(false); }
+}
+
+async function doPurge() {
+    const days = parseInt($("purge-days").value, 10);
+    if (isNaN(days) || days < 0) { log("✗ Nombre de jours invalide.", "err"); return; }
+    if (!confirm(`Supprimer tous les relevés de plus de ${days} jour(s) ?`)) return;
+    busy(true);
+    log(`Purge des relevés de plus de ${days} jour(s)…`, "info");
+    try {
+        const d = await postJson(`/api/db/purge?days=${days}`);
+        log(`✓ Purge terminée : ${d.deleted_rows} relevé(s) supprimé(s).`, "ok");
+        await loadInfo();
+    } catch (e) {
+        log("✗ Purge : " + e.message, "err");
+    } finally { busy(false); }
+}
+
+async function doReset() {
+    if (!confirm("Réinitialiser la base ? TOUS les relevés seront définitivement supprimés.")) return;
+    if (!confirm("Confirmation finale : cette action est irréversible. Continuer ?")) return;
+    busy(true);
+    log("Réinitialisation de la base…", "info");
+    try {
+        const d = await postJson("/api/db/reset?confirm=1");
+        log(`✓ Base réinitialisée : ${d.deleted_rows} relevé(s) supprimé(s). ` +
+            `Taille ${humanSize(d.size_before_bytes)} → ${humanSize(d.size_after_bytes)}.`, "ok");
+        await loadInfo();
+    } catch (e) {
+        log("✗ Réinitialisation : " + e.message, "err");
+    } finally { busy(false); }
+}
+
+async function doIntegrity() {
+    busy(true);
+    const badge = $("integrity-result");
+    badge.style.display = "none";
+    log("Vérification de l'intégrité…", "info");
+    try {
+        const r = await fetch(API + "/api/db/integrity");
+        const d = await r.json();
+        badge.style.display = "";
+        if (d.ok) {
+            badge.className = "badge b-ok"; badge.textContent = "✓ Intègre";
+            log("✓ Intégrité : OK.", "ok");
+        } else {
+            badge.className = "badge b-err"; badge.textContent = "✗ Problème détecté";
+            const details = (d.integrity || []).join(" | ");
+            log("✗ Intégrité : " + (details || "anomalie détectée"), "err");
+        }
+    } catch (e) {
+        log("✗ Intégrité : " + e.message, "err");
+    } finally { busy(false); }
+}
+
+async function doImport() {
+    const file = $("import-file").files[0];
+    if (!file) { log("✗ Aucun fichier sélectionné.", "err"); return; }
+    if (!confirm(`Remplacer la base actuelle par « ${file.name} » (${humanSize(file.size)}) ?\n` +
+                 `L'ancienne base sera sauvegardée en .bak.`)) return;
+    busy(true);
+    log(`Import de « ${file.name} » (${humanSize(file.size)})…`, "info");
+    try {
+        const r = await fetch(API + "/api/db/import", {
+            method: "POST",
+            headers: { "Content-Type": "application/x-sqlite3" },
+            body: file
+        });
+        const d = await r.json().catch(() => ({}));
+        if (!r.ok || !d.ok) throw new Error(d.error || ("HTTP " + r.status));
+        let msg = `✓ Base importée : ${d.metrics_rows ?? "?"} relevé(s).`;
+        if (d.backup_path) msg += ` Sauvegarde : ${d.backup_path}`;
+        log(msg, "ok");
+        $("import-file").value = "";
+        $("btn-import").disabled = true;
+        await loadInfo();
+    } catch (e) {
+        log("✗ Import : " + e.message, "err");
+    } finally { busy(false); }
+}
+
+// ----------------------------------------------------------------------
+// Branchements
+// ----------------------------------------------------------------------
+$("refresh").addEventListener("click", loadInfo);
+$("btn-export-db").addEventListener("click", () => download("/api/db/export", "Base SQLite"));
+$("btn-export-csv").addEventListener("click", () => download("/api/db/export/csv", "Export CSV"));
+$("btn-vacuum").addEventListener("click", doVacuum);
+$("btn-purge").addEventListener("click", doPurge);
+$("btn-reset").addEventListener("click", doReset);
+$("btn-integrity").addEventListener("click", doIntegrity);
+$("btn-import").addEventListener("click", doImport);
+$("import-file").addEventListener("change", e => {
+    $("btn-import").disabled = !e.target.files.length;
+});
+
+// Initialisation
+loadInfo();
+</script>
+</body>
+</html>

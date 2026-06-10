@@ -79,7 +79,10 @@ echo [INFO] Execution de : python !selected_script! !params!
 echo ===================================================
 echo.
 
-python "!selected_script!" !params!
+:: python est lance comme partie droite d'un pipe : Ctrl+C termine le
+:: sous-processus cmd du pipeline au lieu de declencher le prompt
+:: "Terminer le programme de commandes (O/N)" et on revient a la boucle.
+echo. | python "!selected_script!" !params!
 set "EXIT_CODE=!errorlevel!"
 
 echo.

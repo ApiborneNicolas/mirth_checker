@@ -1,0 +1,596 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Mirth Checker — Testeur d'API</title>
+    <style>
+        :root {
+            --bg: #0f172a;
+            --panel: #1e293b;
+            --panel-2: #334155;
+            --border: #293548;
+            --text: #e2e8f0;
+            --muted: #94a3b8;
+            --accent: #38bdf8;
+            --accent-2: #a78bfa;
+            --ok: #22c55e;
+            --err: #ef4444;
+            --warn: #f59e0b;
+        }
+        * { box-sizing: border-box; }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Arial, sans-serif;
+            background: var(--bg);
+            color: var(--text);
+            margin: 0;
+            padding: 24px;
+        }
+        header {
+            display: flex; flex-wrap: wrap; align-items: center;
+            justify-content: space-between; gap: 12px; margin-bottom: 18px;
+        }
+        h1 { font-size: 22px; margin: 0; font-weight: 600; }
+        nav a { color: var(--accent); font-size: 14px; text-decoration: none; margin-left: 16px; }
+        nav a:hover { text-decoration: underline; }
+        .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 18px; align-items: start; }
+        @media (max-width: 900px) { .grid { grid-template-columns: 1fr; } }
+        .panel {
+            background: var(--panel);
+            border: 1px solid var(--border);
+            border-radius: 10px;
+            padding: 18px;
+            margin-bottom: 18px;
+        }
+        .panel h2 {
+            font-size: 15px; margin: 0 0 14px; font-weight: 600;
+            text-transform: uppercase; letter-spacing: .04em; color: var(--muted);
+        }
+        label { font-size: 13px; color: var(--muted); display: block; margin-bottom: 5px; }
+        select, input[type=text], input[type=number], textarea {
+            background: var(--panel-2);
+            color: var(--text);
+            border: 1px solid #475569;
+            border-radius: 6px;
+            padding: 8px 11px;
+            font-size: 14px;
+            width: 100%;
+            font-family: inherit;
+        }
+        textarea { resize: vertical; }
+        button {
+            background: var(--panel-2);
+            color: var(--text);
+            border: 1px solid #475569;
+            border-radius: 6px;
+            padding: 8px 14px;
+            font-size: 14px;
+            cursor: pointer;
+        }
+        button:hover { background: #475569; }
+        button.primary { background: var(--accent); color: #06243a; border-color: var(--accent); font-weight: 600; }
+        button.primary:hover { background: #7dd3fc; }
+        button.small { padding: 4px 10px; font-size: 12px; }
+        .field { margin-bottom: 14px; }
+        .field-row { display: flex; gap: 12px; }
+        .field-row .field { flex: 1; min-width: 0; }
+        .endpoint-desc { font-size: 13px; color: var(--muted); margin: -6px 0 16px; line-height: 1.5; }
+        .method-badge {
+            display: inline-block; font-size: 11px; font-weight: 700; padding: 2px 8px;
+            border-radius: 4px; margin-right: 8px; vertical-align: middle;
+        }
+        .m-GET { background: rgba(34,197,94,.18); color: #4ade80; }
+        .m-POST { background: rgba(245,158,11,.18); color: #fbbf24; }
+        .checks { display: flex; flex-wrap: wrap; gap: 8px 16px; }
+        .checks label {
+            display: flex; align-items: center; gap: 6px; margin: 0;
+            color: var(--text); font-size: 13px; cursor: pointer;
+        }
+        .checks input { width: auto; }
+        .free-row { display: flex; gap: 8px; margin-bottom: 8px; align-items: center; }
+        .free-row input { flex: 1; }
+        .toolbar { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 4px; }
+        .curl-box {
+            position: relative;
+            background: #0b1220; border: 1px solid #475569; border-radius: 6px;
+            padding: 12px 14px; font-family: "Cascadia Code", Consolas, monospace;
+            font-size: 13px; color: #7dd3fc; white-space: pre-wrap; word-break: break-all;
+            margin-bottom: 10px; max-height: 180px; overflow: auto;
+        }
+        .meta { display: grid; grid-template-columns: repeat(auto-fit, minmax(120px, 1fr)); gap: 10px; margin-bottom: 14px; }
+        .meta .cell { background: var(--panel-2); border-radius: 8px; padding: 9px 12px; }
+        .meta .k { font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: .03em; }
+        .meta .v { font-size: 15px; font-weight: 600; margin-top: 3px; word-break: break-word; }
+        #resp-body { min-height: 320px; font-family: "Cascadia Code", Consolas, monospace; font-size: 13px; }
+        .status-ok { color: var(--ok); }
+        .status-err { color: var(--err); }
+        .hint { font-size: 12px; color: var(--muted); margin-top: 6px; }
+        .render-frame {
+            width: 100%; min-height: 320px; border: 1px solid #475569; border-radius: 6px;
+            background: #fff; display: none;
+        }
+    </style>
+</head>
+<body>
+    <header>
+        <h1>🧪 Testeur d'API — Mirth Checker</h1>
+        <nav>
+            <a href="statistiques.html">📊 Statistiques</a>
+            <a href="database.html">🗄️ Base de données</a>
+        </nav>
+    </header>
+
+    <div class="grid">
+        <!-- ================= COLONNE GAUCHE : REQUÊTE ================= -->
+        <div>
+            <div class="panel">
+                <h2>Webservice</h2>
+                <div class="field">
+                    <label for="endpoint">Sélectionner une API</label>
+                    <select id="endpoint"></select>
+                </div>
+                <div class="endpoint-desc" id="endpoint-desc"></div>
+            </div>
+
+            <div class="panel">
+                <h2>Paramètres</h2>
+                <div id="known-params"></div>
+
+                <label style="margin-top:8px;">Paramètres d'URL libres</label>
+                <div id="free-params"></div>
+                <button class="small" id="add-free">+ Ajouter un paramètre</button>
+            </div>
+
+            <div class="panel">
+                <h2>Commande cURL</h2>
+                <div class="curl-box" id="curl"></div>
+                <div class="toolbar">
+                    <button class="small" id="copy-curl">📋 Copier le cURL</button>
+                    <button class="primary" id="send">▶ Envoyer la requête</button>
+                </div>
+            </div>
+        </div>
+
+        <!-- ================= COLONNE DROITE : RÉPONSE ================= -->
+        <div>
+            <div class="panel">
+                <h2>Réponse</h2>
+                <div class="meta">
+                    <div class="cell"><div class="k">Statut</div><div class="v" id="r-status">—</div></div>
+                    <div class="cell"><div class="k">Durée</div><div class="v" id="r-time">—</div></div>
+                    <div class="cell"><div class="k">Type</div><div class="v" id="r-type">—</div></div>
+                    <div class="cell"><div class="k">Taille</div><div class="v" id="r-size">—</div></div>
+                </div>
+                <div class="hint" id="r-ctype">Content-Type : —</div>
+
+                <textarea id="resp-body" readonly placeholder="La réponse s'affichera ici…" style="margin-top:12px;"></textarea>
+                <iframe id="render-frame" class="render-frame" title="Aperçu HTML"></iframe>
+
+                <div class="toolbar" style="margin-top:10px;">
+                    <button class="small" id="copy-resp">📋 Copier</button>
+                    <button class="small" id="save-resp">💾 Enregistrer sous…</button>
+                    <button class="small" id="toggle-render" style="display:none;">👁 Aperçu HTML</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+<script>
+// =====================================================================
+// Registre des webservices exposés par checker_service.py
+//   kind : text | number | select | multicheck | bool
+//   in   : "query" (défaut) | "body" (POST JSON)
+// =====================================================================
+// Chaque endpoint porte une catégorie (`cat`) servant à regrouper la liste
+// déroulante par <optgroup>. Types de paramètres connus : les `kind` "email",
+// "date" et "datetime" produisent les <input> adaptés ; deux paramètres
+// partageant le même `group` sont rendus côte à côte sur une même ligne.
+const ENDPOINTS = [
+    {
+        id: "/api/getsysteminfo", method: "GET", cat: "Info",
+        label: "Infos système à la demande",
+        desc: "Renvoie les informations système choisies (CPU, mémoire, stockage, sockets…) au format JSON, texte (tabulate) ou HTML.",
+        params: [
+            { name: "type", kind: "multicheck", label: "Informations",
+              options: ["datetime","boottime","os","cpu","mem","counts","storage","network","socket","connections","interfaces","vpn","ping"] },
+            { name: "host", kind: "text", label: "Hôte (pour ping)", placeholder: "8.8.8.8" },
+            { name: "format", kind: "select", label: "Format de sortie", options: ["json","text","html"], default: "json" }
+        ]
+    },
+    {
+        id: "/api/getprocessinfo", method: "GET", cat: "Info",
+        label: "Infos processus à la demande",
+        desc: "Infos CPU / mémoire / ports des processus ciblés. Sans cible : top processus par CPU.",
+        params: [
+            { name: "target", kind: "text", label: "Cibles (vide = top)", placeholder: "chrome,python" },
+            { name: "type", kind: "multicheck", label: "Colonnes",
+              options: ["pid","name","cpu","mem","mem_percent","ports"] },
+            { name: "limit", kind: "number", label: "Taille du top", default: "10" },
+            { name: "format", kind: "select", label: "Format de sortie", options: ["json","text","html"], default: "json" }
+        ]
+    },
+    { id: "/api/system", method: "GET", cat: "Info", label: "État système complet",
+      desc: "Instantané système global (CPU, mémoire, disques, réseau, VPN…).", params: [] },
+    { id: "/api/processes", method: "GET", cat: "Info", label: "Processus",
+      desc: "Processus filtrés par cible, ou liste complète si vide.",
+      params: [ { name: "target", kind: "text", label: "Cibles", placeholder: "chrome,python" } ] },
+    { id: "/api/ping", method: "GET", cat: "Info", label: "Ping",
+      desc: "Ping ICMP d'un hôte.",
+      params: [ { name: "host", kind: "text", label: "Hôte", default: "8.8.8.8" } ] },
+    { id: "/api/sockets", method: "GET", cat: "Info", label: "Ports en écoute",
+      desc: "Ports TCP/UDP en écoute, filtrables par processus.",
+      params: [ { name: "target", kind: "text", label: "Cibles", placeholder: "ALL" } ] },
+    { id: "/api/history", method: "GET", cat: "History", label: "Historique des métriques",
+      desc: "Relevés d'une source (tag : system par défaut, mirth, … ; tag=all = toutes sources). Mode dernières heures (hours) OU intervalle de dates (date_deb/date_fin, prioritaire si renseigné ; une date seule couvre la journée).",
+      params: [ { name: "tag", kind: "select", label: "Source (tag)", options: ["system","mirth","all"], default: "system" },
+                { name: "hours", kind: "number", label: "Heures (0 = tout)", default: "24" },
+                { name: "date_deb", kind: "datetime", label: "Début de l'intervalle", group: "interval" },
+                { name: "date_fin", kind: "datetime", label: "Fin de l'intervalle", group: "interval" } ] },
+    { id: "/api/history/latest", method: "GET", cat: "History", label: "Dernier relevé",
+      desc: "Dernier échantillon enregistré pour une source (tag).",
+      params: [ { name: "tag", kind: "select", label: "Source (tag)", options: ["system","mirth"], default: "system" } ] },
+    { id: "/api/db/info", method: "GET", cat: "DB", label: "État de la base",
+      desc: "Taille, fragmentation, tables et bornes temporelles de la base SQLite.", params: [] },
+    { id: "/api/db/integrity", method: "GET", cat: "DB", label: "Intégrité de la base",
+      desc: "Vérifie la cohérence interne de la base (integrity_check).", params: [] },
+    { id: "/api/db/export", method: "GET", cat: "DB", label: "Télécharger la base (.db)",
+      desc: "Copie cohérente du fichier SQLite (téléchargement binaire).", params: [] },
+    { id: "/api/db/export/csv", method: "GET", cat: "DB", label: "Exporter les relevés (CSV)",
+      desc: "Export CSV de la table metrics.", params: [] },
+    { id: "/api/db/vacuum", method: "POST", cat: "DB", label: "Défragmenter la base",
+      desc: "Compacte la base et récupère l'espace libre (VACUUM).", params: [] },
+    { id: "/api/db/purge", method: "POST", cat: "DB", label: "Purger l'historique",
+      desc: "Supprime les relevés plus vieux que N jours.",
+      params: [ { name: "days", kind: "number", label: "Jours à conserver", default: "30" } ] },
+    { id: "/api/db/reset", method: "POST", cat: "DB", label: "Réinitialiser la base",
+      desc: "Supprime tous les relevés puis compacte (confirm requis).",
+      params: [ { name: "confirm", kind: "bool", label: "Confirmer la réinitialisation" } ] },
+    { id: "/api/mirth", method: "GET", cat: "Mirth", label: "Analyse des logs Mirth",
+      desc: "Analyse un fichier de log Mirth (niveaux, canaux, erreurs).",
+      params: [
+          { name: "logfile", kind: "text", label: "Fichier log", placeholder: "(défaut serveur)" },
+          { name: "date", kind: "number", label: "Date (1=tout, 0=auj, -1=J-1)", default: "1" },
+          { name: "rotate", kind: "bool", label: "Inclure les fichiers logrotate" }
+      ] },
+    { id: "/api/mirth/api", method: "GET", cat: "Mirth", label: "Mirth — API REST",
+      desc: "Vue d'ensemble du serveur Mirth via son API REST (version, stats JVM, statuts des canaux). reachable=false si le serveur est injoignable.",
+      params: [ { name: "timeout", kind: "number", label: "Timeout (s)", default: "8" } ] },
+    { id: "/api/mirth/process", method: "GET", cat: "Mirth", label: "Mirth — Processus",
+      desc: "Instantané live du processus Mirth (mirth.exe) : CPU, mémoire et nombre de sockets.", params: [] },
+    { id: "/api/status", method: "GET", cat: "Service", label: "Statut du service", desc: "État du service et du planificateur.", params: [] },
+    { id: "/api/mail", method: "POST", cat: "Mail", label: "Envoyer un email",
+      desc: "Envoie un email via quickmail. Les champs sont transmis dans le corps JSON.",
+      params: [
+          { name: "subject", kind: "text", label: "Sujet", in: "body" },
+          { name: "message", kind: "text", label: "Message", in: "body" },
+          { name: "dest", kind: "email", label: "Destinataire", in: "body", placeholder: "nom@exemple.fr" }
+      ] }
+];
+
+const $ = id => document.getElementById(id);
+let lastBody = "";          // dernier corps de réponse brut (pour copie / sauvegarde)
+let lastExt = "txt";        // extension suggérée pour l'enregistrement
+
+// ----------------------------------------------------------------------
+// Construction du sélecteur d'endpoints
+// ----------------------------------------------------------------------
+const sel = $("endpoint");
+// Regroupe les endpoints par catégorie (`cat`) dans des <optgroup>, en
+// conservant l'ordre d'apparition. La value reste l'index dans ENDPOINTS.
+(() => {
+    const groups = new Map();        // cat -> [index, …]
+    ENDPOINTS.forEach((ep, i) => {
+        const cat = ep.cat || "Autres";
+        if (!groups.has(cat)) groups.set(cat, []);
+        groups.get(cat).push(i);
+    });
+    groups.forEach((indices, cat) => {
+        const og = document.createElement("optgroup");
+        og.label = cat;
+        indices.forEach(i => {
+            const ep = ENDPOINTS[i];
+            const o = document.createElement("option");
+            o.value = i;
+            o.textContent = `${ep.method}  ${ep.id}  —  ${ep.label}`;
+            og.appendChild(o);
+        });
+        sel.appendChild(og);
+    });
+})();
+
+function currentEndpoint() { return ENDPOINTS[parseInt(sel.value, 10)]; }
+
+// ----------------------------------------------------------------------
+// Rendu dynamique des champs de paramètres connus
+// ----------------------------------------------------------------------
+function renderParams() {
+    const ep = currentEndpoint();
+    $("endpoint-desc").innerHTML =
+        `<span class="method-badge m-${ep.method}">${ep.method}</span>${ep.desc || ""}`;
+
+    const box = $("known-params");
+    box.innerHTML = "";
+    if (!ep.params.length) {
+        box.innerHTML = '<div class="hint">Aucun paramètre prévu pour cette API.</div>';
+    }
+
+    // Les paramètres partageant un même `group` sont rassemblés dans une
+    // ligne flex (.field-row) afin d'apparaître côte à côte (ex. date_deb/date_fin).
+    let i = 0;
+    while (i < ep.params.length) {
+        const p = ep.params[i];
+        if (p.group) {
+            const row = document.createElement("div");
+            row.className = "field-row";
+            while (i < ep.params.length && ep.params[i].group === p.group) {
+                row.appendChild(buildParamField(ep.params[i]));
+                i++;
+            }
+            box.appendChild(row);
+        } else {
+            box.appendChild(buildParamField(p));
+            i++;
+        }
+    }
+
+    updateCurl();
+}
+
+// Construit le bloc .field d'un paramètre selon son `kind`.
+function buildParamField(p) {
+    const field = document.createElement("div");
+    field.className = "field";
+    const lbl = document.createElement("label");
+    lbl.textContent = p.label + (p.in === "body" ? "  (corps JSON)" : "");
+    field.appendChild(lbl);
+
+    if (p.kind === "select") {
+        const s = document.createElement("select");
+        s.dataset.param = p.name; s.dataset.in = p.in || "query";
+        p.options.forEach(opt => {
+            const o = document.createElement("option");
+            o.value = opt; o.textContent = opt;
+            if (opt === p.default) o.selected = true;
+            s.appendChild(o);
+        });
+        field.appendChild(s);
+    } else if (p.kind === "multicheck") {
+        const wrap = document.createElement("div");
+        wrap.className = "checks";
+        wrap.dataset.param = p.name; wrap.dataset.in = p.in || "query";
+        p.options.forEach(opt => {
+            const l = document.createElement("label");
+            const cb = document.createElement("input");
+            cb.type = "checkbox"; cb.value = opt;
+            l.appendChild(cb);
+            l.appendChild(document.createTextNode(opt));
+            wrap.appendChild(l);
+        });
+        field.appendChild(wrap);
+    } else if (p.kind === "bool") {
+        const l = document.createElement("label");
+        l.className = "checks";
+        const cb = document.createElement("input");
+        cb.type = "checkbox"; cb.dataset.param = p.name; cb.dataset.in = p.in || "query";
+        cb.dataset.bool = "1";
+        l.appendChild(cb);
+        l.appendChild(document.createTextNode("Activer"));
+        field.appendChild(l);
+    } else {
+        // Types de saisie connus -> <input> spécialisé.
+        const TYPES = { number: "number", email: "email", date: "date", datetime: "datetime-local" };
+        const inp = document.createElement("input");
+        inp.type = TYPES[p.kind] || "text";
+        inp.dataset.param = p.name; inp.dataset.in = p.in || "query";
+        inp.dataset.kind = p.kind || "text";
+        if (p.placeholder) inp.placeholder = p.placeholder;
+        if (p.default !== undefined) inp.value = p.default;
+        field.appendChild(inp);
+    }
+    return field;
+}
+
+// ----------------------------------------------------------------------
+// Paramètres libres (clé/valeur ajoutables)
+// ----------------------------------------------------------------------
+function addFreeRow(name = "", value = "") {
+    const row = document.createElement("div");
+    row.className = "free-row";
+    row.innerHTML =
+        '<input type="text" class="free-name" placeholder="nom">' +
+        '<input type="text" class="free-value" placeholder="valeur">' +
+        '<button class="small free-del">✕</button>';
+    row.querySelector(".free-name").value = name;
+    row.querySelector(".free-value").value = value;
+    row.querySelector(".free-del").addEventListener("click", () => { row.remove(); updateCurl(); });
+    $("free-params").appendChild(row);
+}
+
+// ----------------------------------------------------------------------
+// Collecte des paramètres -> construit la requête
+// ----------------------------------------------------------------------
+function collectRequest() {
+    const ep = currentEndpoint();
+    const query = {};   // params d'URL
+    const body = {};    // params de corps JSON (POST)
+
+    $("known-params").querySelectorAll("[data-param]").forEach(el => {
+        const name = el.dataset.param;
+        const target = el.dataset.in === "body" ? body : query;
+
+        if (el.classList.contains("checks")) {                 // multicheck wrapper
+            const vals = [...el.querySelectorAll("input:checked")].map(c => c.value);
+            if (vals.length) target[name] = vals.join(",");
+        } else if (el.dataset.bool) {                          // case unique
+            if (el.checked) target[name] = "1";
+        } else {                                               // input / select
+            let v = (el.value || "").trim();
+            // <input datetime-local> renvoie "YYYY-MM-DDTHH:MM" ; l'API attend
+            // "YYYY-MM-DD HH:MM:SS".
+            if (el.dataset.kind === "datetime" && v) {
+                v = v.replace("T", " ");
+                if (v.length === 16) v += ":00";
+            }
+            if (v !== "") target[name] = v;
+        }
+    });
+
+    // Paramètres libres -> toujours dans l'URL
+    $("free-params").querySelectorAll(".free-row").forEach(row => {
+        const n = row.querySelector(".free-name").value.trim();
+        const v = row.querySelector(".free-value").value.trim();
+        if (n) query[n] = v;
+    });
+
+    const qs = new URLSearchParams(query).toString();
+    const url = location.origin + ep.id + (qs ? "?" + qs : "");
+    const hasBody = ep.method === "POST" && Object.keys(body).length > 0;
+    return { method: ep.method, url, hasBody, body };
+}
+
+// ----------------------------------------------------------------------
+// Génération de la commande cURL
+// ----------------------------------------------------------------------
+function updateCurl() {
+    const r = collectRequest();
+    let cmd = `curl "${r.url}"`;
+    if (r.method !== "GET") cmd = `curl -X ${r.method} "${r.url}"`;
+    if (r.hasBody) {
+        const json = JSON.stringify(r.body);
+        cmd += ` \\\n  -H "Content-Type: application/json" \\\n  -d '${json}'`;
+    }
+    $("curl").textContent = cmd;
+}
+
+// ----------------------------------------------------------------------
+// Envoi de la requête + affichage de la réponse
+// ----------------------------------------------------------------------
+function humanSize(bytes) {
+    if (bytes < 1024) return bytes + " o";
+    if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + " Ko";
+    return (bytes / (1024 * 1024)).toFixed(2) + " Mo";
+}
+
+function classifyType(ctype) {
+    const c = (ctype || "").toLowerCase();
+    if (c.includes("application/json")) return { label: "JSON", ext: "json" };
+    if (c.includes("text/html")) return { label: "HTML", ext: "html" };
+    if (c.includes("text/")) return { label: "Texte", ext: "txt" };
+    return { label: "Fichier", ext: "bin" };
+}
+
+async function sendRequest() {
+    const r = collectRequest();
+    $("r-status").textContent = "…";
+    $("r-status").className = "v";
+
+    const opts = { method: r.method };
+    if (r.hasBody) {
+        opts.headers = { "Content-Type": "application/json" };
+        opts.body = JSON.stringify(r.body);
+    }
+
+    const t0 = performance.now();
+    let resp, text;
+    try {
+        resp = await fetch(r.url, opts);
+        text = await resp.text();
+    } catch (e) {
+        const dt = (performance.now() - t0).toFixed(0);
+        $("r-status").textContent = "Erreur";
+        $("r-status").className = "v status-err";
+        $("r-time").textContent = dt + " ms";
+        $("r-type").textContent = "—";
+        $("r-size").textContent = "—";
+        $("r-ctype").textContent = "Content-Type : —";
+        $("resp-body").value = "Échec de la requête : " + e.message;
+        return;
+    }
+    const dt = (performance.now() - t0).toFixed(0);
+    const ctype = resp.headers.get("Content-Type") || "";
+    const kind = classifyType(ctype);
+    const bytes = new Blob([text]).size;
+
+    // Pretty-print du JSON pour la lisibilité
+    let display = text;
+    if (kind.ext === "json") {
+        try { display = JSON.stringify(JSON.parse(text), null, 2); } catch (e) {}
+    }
+
+    $("r-status").textContent = resp.status + " " + resp.statusText;
+    $("r-status").className = "v " + (resp.ok ? "status-ok" : "status-err");
+    $("r-time").textContent = dt + " ms";
+    $("r-type").textContent = kind.label;
+    $("r-size").textContent = humanSize(bytes);
+    $("r-ctype").textContent = "Content-Type : " + (ctype || "—");
+
+    lastBody = text;
+    lastExt = kind.ext;
+    $("resp-body").value = display;
+
+    // Aperçu HTML disponible si la réponse est du HTML
+    const frame = $("render-frame");
+    const toggle = $("toggle-render");
+    if (kind.ext === "html") {
+        frame.srcdoc = text;
+        toggle.style.display = "";
+        showRendered(false);
+    } else {
+        toggle.style.display = "none";
+        showRendered(false);
+    }
+}
+
+let rendered = false;
+function showRendered(on) {
+    rendered = on;
+    $("render-frame").style.display = on ? "block" : "none";
+    $("resp-body").style.display = on ? "none" : "block";
+    $("toggle-render").textContent = on ? "📄 Voir le code" : "👁 Aperçu HTML";
+}
+
+// ----------------------------------------------------------------------
+// Actions : copier / enregistrer
+// ----------------------------------------------------------------------
+function copyText(txt, btn) {
+    navigator.clipboard.writeText(txt).then(() => {
+        const old = btn.textContent;
+        btn.textContent = "✓ Copié";
+        setTimeout(() => btn.textContent = old, 1200);
+    }).catch(() => alert("Copie impossible (presse-papiers indisponible)."));
+}
+
+function saveResponse() {
+    if (!lastBody) { alert("Aucune réponse à enregistrer."); return; }
+    const ep = currentEndpoint();
+    const base = ep.id.replace(/[\/]/g, "_").replace(/^_/, "");
+    const stamp = new Date().toISOString().slice(0, 19).replace(/[:T]/g, "-");
+    const blob = new Blob([lastBody], { type: "application/octet-stream" });
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(blob);
+    a.download = `${base}_${stamp}.${lastExt}`;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    setTimeout(() => URL.revokeObjectURL(a.href), 2000);
+}
+
+// ----------------------------------------------------------------------
+// Branchements
+// ----------------------------------------------------------------------
+sel.addEventListener("change", renderParams);
+$("known-params").addEventListener("input", updateCurl);
+$("known-params").addEventListener("change", updateCurl);
+$("free-params").addEventListener("input", updateCurl);
+$("add-free").addEventListener("click", () => addFreeRow());
+$("send").addEventListener("click", sendRequest);
+$("copy-curl").addEventListener("click", e => copyText($("curl").textContent, e.target));
+$("copy-resp").addEventListener("click", e => copyText($("resp-body").value, e.target));
+$("save-resp").addEventListener("click", saveResponse);
+$("toggle-render").addEventListener("click", () => showRendered(!rendered));
+
+// Initialisation
+renderParams();
+</script>
+</body>
+</html>

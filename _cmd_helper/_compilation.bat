@@ -67,10 +67,10 @@ if not exist ".smtp_config.py" (
 REM ---- Compilation ----
 echo.
 echo [INFO] Compilation des scripts...
+%PYINSTALLER%  --onefile system_state.py
 %PYINSTALLER%  --onefile --add-data ".smtp_config.py;." quickmail.py
 %PYINSTALLER%  --onefile --add-data ".smtp_config.py;." mirth_logs_parser.py
-%PYINSTALLER%  --onefile system_state.py
-
+%PYINSTALLER%  --onefile --add-data ".smtp_config.py;." checker_service.py
 echo.
 echo [OK] Compilation terminee !
 

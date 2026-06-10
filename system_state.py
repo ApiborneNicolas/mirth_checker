@@ -12,6 +12,9 @@ from tabulate import tabulate
 def get_now_datetime() -> str:
     return datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
+def get_hostname() -> str:
+    return platform.node() or socket.gethostname()
+
 def get_boot_time() -> str:
     return datetime.datetime.fromtimestamp(psutil.boot_time()).strftime("%Y-%m-%d %H:%M:%S")
 

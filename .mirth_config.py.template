@@ -1,0 +1,22 @@
+# -*- coding: utf-8 -*-
+# Modèle de configuration pour le client API Mirth Connect.
+# Copiez ce fichier en `.mirth_config.py` (git-ignoré) puis renseignez vos valeurs :
+#     copy .mirth_config.py.template .mirth_config.py
+#
+# Les variables d'environnement de même nom (MIRTH_BASE_URL, MIRTH_USER, ...)
+# restent prioritaires sur ce fichier.
+
+# URL de base de l'API REST Mirth (sans slash final). Port 8443 par défaut.
+MIRTH_BASE_URL = "https://localhost:8443/api"
+
+# Identifiants d'un compte Mirth disposant de l'accès API.
+MIRTH_USER = "admin"
+MIRTH_PASSWORD = "admin"
+
+# Vérifier le certificat TLS du serveur. False = accepte les certificats
+# auto-signés (cas par défaut d'une installation Mirth standard).
+MIRTH_VERIFY_SSL = False
+
+# Nom du processus système hébergeant Mirth, surveillé pour l'historisation
+# CPU / mémoire / sockets (ex. "mirth.exe", "mcservice.exe", "java.exe").
+MIRTH_PROCESS = "mirth.exe"

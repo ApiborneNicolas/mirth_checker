@@ -4,3 +4,9 @@
 /__pycache__
 /*.spec
 /.smtp_config.py
+/.mirth_config.py
+/lib/__pycache__
+/checker_history.db
+/checker_history.db-wal
+/checker_history.db-shm
+/checker_history.db.bak

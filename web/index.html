@@ -1,0 +1,31 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Mirth Checker — Redirection</title>
+    <!-- Redirection automatique vers la page de statistiques -->
+    <meta http-equiv="refresh" content="0; url=statistiques.html">
+    <link rel="canonical" href="statistiques.html">
+    <script>
+        // Redirection immédiate (fallback si meta refresh est ignoré)
+        window.location.replace("statistiques.html");
+    </script>
+    <style>
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Arial, sans-serif;
+            background: #0f172a;
+            color: #e2e8f0;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            height: 100vh;
+            margin: 0;
+        }
+        a { color: #38bdf8; }
+    </style>
+</head>
+<body>
+    <p>Redirection vers les <a href="statistiques.html">statistiques</a>…</p>
+</body>
+</html>

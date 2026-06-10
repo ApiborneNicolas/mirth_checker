@@ -1,0 +1,941 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Mirth Checker — Statistiques système</title>
+    <!-- Chart.js + adaptateur de dates (CDN) -->
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/luxon@3.4.4/build/global/luxon.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chartjs-adapter-luxon@1.3.1/dist/chartjs-adapter-luxon.umd.min.js"></script>
+    <style>
+        :root {
+            --bg: #0f172a;
+            --panel: #1e293b;
+            --panel-2: #334155;
+            --text: #e2e8f0;
+            --muted: #94a3b8;
+            --cpu: #38bdf8;
+            --mem: #a78bfa;
+            --disk: #f59e0b;
+            --sock: #2dd4bf;
+            --ok: #22c55e;
+            --err: #ef4444;
+        }
+        * { box-sizing: border-box; }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Arial, sans-serif;
+            background: var(--bg);
+            color: var(--text);
+            margin: 0;
+            padding: 24px;
+        }
+        header {
+            display: flex;
+            flex-wrap: wrap;
+            align-items: center;
+            justify-content: space-between;
+            gap: 12px;
+            margin-bottom: 20px;
+        }
+        h1 { font-size: 22px; margin: 0; font-weight: 600; }
+        .controls { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+        select, button {
+            background: var(--panel-2);
+            color: var(--text);
+            border: 1px solid #475569;
+            border-radius: 6px;
+            padding: 7px 12px;
+            font-size: 14px;
+            cursor: pointer;
+        }
+        button:hover { background: #475569; }
+        .status { font-size: 13px; color: var(--muted); }
+        .cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 14px; margin-bottom: 22px; }
+        .card {
+            background: var(--panel);
+            border: 1px solid #293548;
+            border-radius: 10px;
+            padding: 16px 18px;
+        }
+        .card .label { font-size: 12px; color: var(--muted); text-transform: uppercase; letter-spacing: .04em; }
+        .card .value { font-size: 28px; font-weight: 600; margin-top: 6px; }
+        .card .sub { font-size: 12px; color: var(--muted); margin-top: 4px; }
+        .chart-panel {
+            background: var(--panel);
+            border: 1px solid #293548;
+            border-radius: 10px;
+            padding: 18px;
+            margin-bottom: 22px;
+        }
+        .chart-wrap { position: relative; height: 380px; }
+        footer { font-size: 12px; color: var(--muted); text-align: center; margin-top: 8px; }
+        .dot { display: inline-block; width: 9px; height: 9px; border-radius: 50%; margin-right: 5px; }
+        .pulse { animation: pulse 2s infinite; }
+        @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:.4} }
+        .sysinfo {
+            display: flex; flex-wrap: wrap; gap: 10px 22px;
+            background: var(--panel); border: 1px solid #293548; border-radius: 10px;
+            padding: 12px 18px; margin-bottom: 18px; font-size: 14px; color: var(--muted);
+        }
+        .sysinfo b { color: var(--text); font-weight: 600; }
+        .legend-events { display: flex; gap: 18px; margin-bottom: 10px; font-size: 12px; color: var(--muted); }
+        .legend-events span { display: inline-flex; align-items: center; gap: 6px; }
+        .vbar { display: inline-block; width: 3px; height: 13px; border-radius: 1px; }
+        .section-title {
+            font-size: 17px; font-weight: 600; margin: 34px 0 14px;
+            padding-bottom: 8px; border-bottom: 1px solid #293548;
+            display: flex; align-items: center; gap: 9px;
+        }
+        .panel-title { font-size: 14px; font-weight: 600; margin: 0 0 12px; color: var(--text); }
+        table.mtable { width: 100%; border-collapse: collapse; font-size: 13px; }
+        table.mtable th, table.mtable td {
+            text-align: left; padding: 7px 10px; border-bottom: 1px solid #293548;
+        }
+        table.mtable th { color: var(--muted); font-weight: 600; text-transform: uppercase; letter-spacing: .03em; font-size: 11px; }
+        table.mtable td.num { text-align: right; font-variant-numeric: tabular-nums; }
+        .badge {
+            display: inline-block; padding: 2px 8px; border-radius: 10px;
+            font-size: 11px; font-weight: 600;
+        }
+        .badge.on { background: rgba(34,197,94,.16); color: #4ade80; }
+        .badge.off { background: rgba(239,68,68,.16); color: #f87171; }
+        .badge.warn { background: rgba(245,158,11,.16); color: #fbbf24; }
+        .badge.idle { background: rgba(148,163,184,.16); color: #cbd5e1; }
+        .muted-note { font-size: 12px; color: var(--muted); margin-top: 8px; }
+        .nav-link { color: var(--cpu); font-size: 14px; text-decoration: none; }
+        .nav-link:hover { text-decoration: underline; }
+        .range-summary { font-size: 13px; color: var(--muted); }
+        .range-summary b { color: var(--text); font-weight: 600; }
+
+        /* ---------- Modale Période & intervalle ---------- */
+        .modal-overlay {
+            position: fixed; inset: 0; background: rgba(2,6,23,.66);
+            display: none; align-items: center; justify-content: center; z-index: 50;
+            backdrop-filter: blur(2px);
+        }
+        .modal-overlay.open { display: flex; }
+        .modal {
+            background: var(--panel); border: 1px solid #293548; border-radius: 12px;
+            width: min(460px, calc(100vw - 32px)); max-height: calc(100vh - 48px);
+            overflow: auto; box-shadow: 0 24px 60px rgba(0,0,0,.45);
+        }
+        .modal-head {
+            display: flex; align-items: center; justify-content: space-between;
+            padding: 16px 20px; border-bottom: 1px solid #293548;
+        }
+        .modal-head h2 { font-size: 16px; margin: 0; font-weight: 600; }
+        .modal-close {
+            background: none; border: none; color: var(--muted); font-size: 20px;
+            cursor: pointer; line-height: 1; padding: 2px 6px;
+        }
+        .modal-close:hover { color: var(--text); background: none; }
+        .modal-body { padding: 18px 20px; }
+        .modal-section { margin-bottom: 20px; }
+        .modal-section:last-child { margin-bottom: 0; }
+        .modal-section > .sec-label {
+            font-size: 12px; text-transform: uppercase; letter-spacing: .05em;
+            color: var(--muted); font-weight: 600; margin-bottom: 9px;
+        }
+        .modal .field-label { font-size: 12px; color: var(--muted); display: block; margin-bottom: 4px; }
+        .modal select, .modal input[type=datetime-local] {
+            background: var(--panel-2); color: var(--text); border: 1px solid #475569;
+            border-radius: 6px; padding: 8px 11px; font-size: 14px; width: 100%; font-family: inherit;
+        }
+        .modal .date-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+        .modal .modal-actions { display: flex; gap: 8px; margin-top: 12px; flex-wrap: wrap; }
+        .modal button.primary { background: var(--cpu); color: #06243a; border-color: var(--cpu); font-weight: 600; }
+        .modal button.primary:hover { background: #7dd3fc; }
+        .switch-row { display: flex; align-items: center; gap: 9px; font-size: 14px; color: var(--text); }
+        .switch-row input { width: 16px; height: 16px; cursor: pointer; }
+        .modal .hint { font-size: 12px; color: var(--muted); margin-top: 8px; line-height: 1.5; }
+    </style>
+</head>
+<body>
+    <header>
+        <h1>📊 Statistiques système — Mirth Checker</h1>
+        <div class="controls">
+            <span class="range-summary" id="range-summary">—</span>
+            <button id="openRange" title="Configurer la période, l'intervalle et le rafraîchissement">⚙ Période…</button>
+            <button id="refresh">↻ Rafraîchir</button>
+            <a href="database.html" class="nav-link">🗄️ Base de données</a>
+            <a href="api.html" class="nav-link">🧪 Testeur d'API</a>
+        </div>
+    </header>
+
+    <!-- ================= MODALE : PÉRIODE / INTERVALLE / REFRESH ================= -->
+    <div class="modal-overlay" id="range-modal">
+        <div class="modal" role="dialog" aria-modal="true" aria-labelledby="range-modal-title">
+            <div class="modal-head">
+                <h2 id="range-modal-title">⚙ Période &amp; intervalle</h2>
+                <button class="modal-close" id="closeRange" title="Fermer">✕</button>
+            </div>
+            <div class="modal-body">
+                <div class="modal-section">
+                    <div class="sec-label">Période glissante</div>
+                    <label class="field-label" for="range">Dernières…</label>
+                    <select id="range">
+                        <option value="1">1 heure</option>
+                        <option value="6">6 heures</option>
+                        <option value="24" selected>24 heures</option>
+                        <option value="72">3 jours</option>
+                        <option value="168">7 jours</option>
+                        <option value="0">Tout l'historique</option>
+                    </select>
+                </div>
+
+                <div class="modal-section">
+                    <div class="sec-label">Intervalle de dates</div>
+                    <div class="date-grid">
+                        <div>
+                            <label class="field-label" for="date_deb">Début</label>
+                            <input type="datetime-local" id="date_deb" title="Date de début">
+                        </div>
+                        <div>
+                            <label class="field-label" for="date_fin">Fin</label>
+                            <input type="datetime-local" id="date_fin" title="Date de fin">
+                        </div>
+                    </div>
+                    <div class="modal-actions">
+                        <button id="applyInterval" class="primary" title="Analyser l'intervalle de dates">Appliquer l'intervalle</button>
+                        <button id="clearInterval" style="display:none" title="Revenir au mode période">✕ Revenir à la période</button>
+                    </div>
+                    <div class="hint">Renseignez au moins une date. En mode intervalle, l'auto-rafraîchissement est suspendu.</div>
+                </div>
+
+                <div class="modal-section">
+                    <div class="sec-label">Rafraîchissement</div>
+                    <label class="switch-row"><input type="checkbox" id="autorefresh" checked> Auto-rafraîchir (toutes les 30 s)</label>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <div class="sysinfo" id="sysinfo">
+        <span title="Nom de la machine">🖥 Hôte : <b id="si-host">—</b></span>
+        <span title="Démarrage du système">⏻ Démarré le <b id="si-boot">—</b></span>
+        <span title="Heure locale du système">🕐 Heure système : <b id="si-now">—</b></span>
+    </div>
+
+    <h2 class="section-title">🖥 Système</h2>
+
+    <div class="cards" id="cards">
+        <div class="card">
+            <div class="label"><span class="dot" style="background:var(--cpu)"></span>CPU</div>
+            <div class="value" id="card-cpu">—</div>
+            <div class="sub" id="card-cpu-sub">en attente…</div>
+        </div>
+        <div class="card">
+            <div class="label"><span class="dot" style="background:var(--mem)"></span>Mémoire</div>
+            <div class="value" id="card-mem">—</div>
+            <div class="sub" id="card-mem-sub"></div>
+        </div>
+        <div class="card">
+            <div class="label"><span class="dot" style="background:var(--disk)"></span>Stockage</div>
+            <div class="value" id="card-disk">—</div>
+            <div class="sub" id="card-disk-sub"></div>
+        </div>
+        <div class="card">
+            <div class="label">Échantillons</div>
+            <div class="value" id="card-count">—</div>
+            <div class="sub" id="card-updated"></div>
+        </div>
+    </div>
+
+    <div class="chart-panel">
+        <div class="legend-events">
+            <span><span class="vbar" style="background:#ef4444"></span> Démarrage système</span>
+            <span><span class="vbar" style="background:#22c55e"></span> Start/stop checker</span>
+            <span><span class="vbar" style="background:#a78bfa"></span> Start/stop Mirth</span>
+            <span><span class="vbar" style="background:#f59e0b"></span> Alarme / autre</span>
+            <span>Barres = évènements superposés (<code>/api/events</code>). La courbe se brise sur les valeurs nulles.</span>
+        </div>
+        <div class="chart-wrap">
+            <canvas id="chart"></canvas>
+        </div>
+    </div>
+
+    <!-- ================= 2e SECTION : SUPERVISION MIRTH ================= -->
+    <h2 class="section-title">🩺 Supervision Mirth</h2>
+
+    <div class="sysinfo" id="mirth-api-bar">
+        <span title="État de l'API REST Mirth">🔌 API Mirth : <b id="ma-status">—</b></span>
+        <span title="Version du serveur Mirth">🏷 Version : <b id="ma-version">—</b></span>
+        <span title="Canaux déployés (démarrés / total)">📡 Canaux : <b id="ma-channels">—</b></span>
+        <span title="URL de l'API Mirth interrogée">🧩 <b id="ma-url">—</b></span>
+    </div>
+
+    <div class="cards" id="mirth-cards">
+        <div class="card">
+            <div class="label"><span class="dot" style="background:var(--cpu)"></span>CPU processus</div>
+            <div class="value" id="mp-cpu">—</div>
+            <div class="sub" id="mp-cpu-sub">en attente…</div>
+        </div>
+        <div class="card">
+            <div class="label"><span class="dot" style="background:var(--mem)"></span>Mémoire processus</div>
+            <div class="value" id="mp-mem">—</div>
+            <div class="sub" id="mp-mem-sub"></div>
+        </div>
+        <div class="card">
+            <div class="label"><span class="dot" style="background:var(--sock)"></span>Sockets</div>
+            <div class="value" id="mp-sock">—</div>
+            <div class="sub" id="mp-sock-sub"></div>
+        </div>
+        <div class="card">
+            <div class="label">Processus</div>
+            <div class="value" id="mp-state">—</div>
+            <div class="sub" id="mp-state-sub"></div>
+        </div>
+    </div>
+
+    <div class="chart-panel">
+        <div class="legend-events">
+            <span>Suivi temporel du processus Mirth (tag <code>mirth</code>) — les courbes restent à 0 lorsque le processus est arrêté ; les barres verticales signalent les évènements (start/stop, alarmes, …).</span>
+        </div>
+        <div class="chart-wrap">
+            <canvas id="mirthChart"></canvas>
+        </div>
+    </div>
+
+    <div class="chart-panel" id="channels-panel">
+        <div class="panel-title">📡 Canaux Mirth (API REST)</div>
+        <table class="mtable" id="channels-table">
+            <thead>
+                <tr>
+                    <th>Canal</th><th>État</th>
+                    <th class="num">Reçus</th><th class="num">Filtrés</th>
+                    <th class="num">En file</th><th class="num">Envoyés</th><th class="num">Erreurs</th>
+                </tr>
+            </thead>
+            <tbody id="channels-body">
+                <tr><td colspan="7" class="muted-note">En attente de l'API Mirth…</td></tr>
+            </tbody>
+        </table>
+        <div class="muted-note" id="channels-note"></div>
+    </div>
+
+    <footer>
+        <span id="foot-status"><span class="dot pulse" style="background:var(--ok)"></span>Connecté</span>
+        — Données relevées toutes les 60 s par <code>checker_service.py</code>
+    </footer>
+
+<script>
+const API = "";              // même origine que la page
+let chart = null;
+let autoTimer = null;
+let clockBase = null;        // synchro horloge système : {serverMs, localMs}
+let intervalMode = false;    // false => mode "période (heures)", true => intervalle de dates
+
+// Cache client des relevés : tout le travail d'accumulation / rendu se fait ici,
+// côté navigateur, afin de ne solliciter le service que pour les nouveaux points.
+const state = { samples: [], seenIds: new Set() };
+
+// Cache client distinct pour les relevés du processus Mirth (tag 'mirth').
+const mirthState = { samples: [], seenIds: new Set() };
+let mirthChart = null;
+let mirthOverviewTimer = null;
+
+// Second jeu de données temporel : les ÉVÈNEMENTS/ALERTES (table `events`).
+// Partagé par TOUS les graphiques : chaque évènement devient une barre verticale
+// colorée + texte, superposée aux courbes système et Mirth.
+const alertState = { events: [], seenIds: new Set() };
+
+// Convertit les évènements du cache en marqueurs pour le plugin de lignes verticales.
+function eventMarkers() {
+    return alertState.events.map(e => ({
+        t: luxon.DateTime.fromFormat(e.timestamp, "yyyy-MM-dd HH:mm:ss").toJSDate(),
+        color: e.color || "#94a3b8",
+        label: e.label || e.category || "évènement"
+    }));
+}
+
+function pct(v) { return (v === null || v === undefined) ? "—" : v.toFixed(1) + " %"; }
+
+// Horodatage "yyyy-MM-dd HH:mm:ss" -> millisecondes.
+function tsToMs(ts) { return luxon.DateTime.fromFormat(ts, "yyyy-MM-dd HH:mm:ss").toMillis(); }
+
+// Estimation de l'heure serveur (basée sur la synchro clockBase), repli sur l'heure locale.
+function serverNowMs() {
+    return clockBase ? clockBase.serverMs + (Date.now() - clockBase.localMs) : Date.now();
+}
+
+// Plugin Chart.js : trace une ligne verticale à chaque évènement (boot / restart).
+const eventLinesPlugin = {
+    id: "eventLines",
+    afterDatasetsDraw(chart) {
+        const markers = chart.$eventMarkers || [];
+        if (!markers.length) return;
+        const { ctx, chartArea: { top, bottom }, scales: { x } } = chart;
+        markers.forEach(m => {
+            const px = x.getPixelForValue(m.t);
+            if (px < chart.chartArea.left || px > chart.chartArea.right) return;
+            ctx.save();
+            ctx.beginPath();
+            ctx.setLineDash([4, 3]);
+            ctx.lineWidth = 1.5;
+            ctx.strokeStyle = m.color;
+            ctx.moveTo(px, top);
+            ctx.lineTo(px, bottom);
+            ctx.stroke();
+            ctx.setLineDash([]);
+            ctx.fillStyle = m.color;
+            ctx.font = "10px sans-serif";
+            ctx.textAlign = "center";
+            ctx.fillText(m.label, px, top + 9);
+            ctx.restore();
+        });
+    }
+};
+
+async function fetchHistory(params) {
+    const qs = new URLSearchParams(params).toString();
+    const r = await fetch(`${API}/api/history?${qs}`);
+    if (!r.ok) throw new Error("HTTP " + r.status);
+    return r.json();
+}
+
+async function fetchEvents(params) {
+    const qs = new URLSearchParams(params).toString();
+    const r = await fetch(`${API}/api/events?${qs}`);
+    if (!r.ok) throw new Error("HTTP " + r.status);
+    return r.json();
+}
+
+// Chargement complet des évènements/alertes (même fenêtre que les relevés), puis
+// redessin des deux graphes pour y superposer les barres verticales.
+async function loadEventsFull() {
+    try {
+        const data = await fetchEvents(currentParams());
+        alertState.events = data.events;
+        alertState.seenIds = new Set(data.events.map(e => e.id));
+        render();
+        renderMirth();
+    } catch (e) { /* la section système gère déjà le bandeau hors-ligne */ }
+}
+
+// Chargement incrémental des évènements (auto-rafraîchissement) : ne demande que
+// les évènements postérieurs au dernier connu, les ajoute, puis redessine.
+async function loadEventsIncremental() {
+    if (intervalMode) return loadEventsFull();
+    try {
+        const last = alertState.events.length
+            ? alertState.events[alertState.events.length - 1].timestamp : null;
+        const data = await fetchEvents(last ? { date_deb: last } : currentParams());
+        let added = false;
+        for (const e of data.events) {
+            if (!alertState.seenIds.has(e.id)) {
+                alertState.events.push(e);
+                alertState.seenIds.add(e.id);
+                added = true;
+            }
+        }
+        // Élague selon la même fenêtre glissante que les relevés système.
+        if (!intervalMode) {
+            const hours = parseFloat(document.getElementById("range").value);
+            if (hours && hours > 0) {
+                const cutoff = serverNowMs() - hours * 3600 * 1000;
+                const before = alertState.events.length;
+                alertState.events = alertState.events.filter(e => tsToMs(e.timestamp) >= cutoff);
+                if (alertState.events.length !== before) {
+                    alertState.seenIds = new Set(alertState.events.map(e => e.id));
+                    added = true;
+                }
+            }
+        }
+        if (added) { render(); renderMirth(); }
+    } catch (e) { /* ignore */ }
+}
+
+// Convertit une valeur <input datetime-local> ("YYYY-MM-DDTHH:MM") en format
+// attendu par l'API ("YYYY-MM-DD HH:MM:SS"). Chaîne vide si non renseigné.
+function toApiDate(v) {
+    if (!v) return "";
+    v = v.replace("T", " ");
+    return v.length === 16 ? v + ":00" : v;   // ajoute les secondes si absentes
+}
+
+function buildChart(samples) {
+    const labels = samples.map(s => luxon.DateTime.fromFormat(s.timestamp, "yyyy-MM-dd HH:mm:ss").toJSDate());
+    const cpu  = samples.map(s => s.cpu_percent);
+    const mem  = samples.map(s => s.mem_percent);
+    const disk = samples.map(s => s.disk_percent);
+
+    // spanGaps: false => la courbe se brise sur les relevés nuls (coupures/boot).
+    const datasets = [
+        { label: "CPU %",      data: cpu,  borderColor: "#38bdf8", backgroundColor: "rgba(56,189,248,.12)", tension: .25, fill: true, pointRadius: 0, borderWidth: 2, spanGaps: false },
+        { label: "Mémoire %",  data: mem,  borderColor: "#a78bfa", backgroundColor: "rgba(167,139,250,.10)", tension: .25, fill: true, pointRadius: 0, borderWidth: 2, spanGaps: false },
+        { label: "Stockage %", data: disk, borderColor: "#f59e0b", backgroundColor: "rgba(245,158,11,.08)",  tension: .25, fill: true, pointRadius: 0, borderWidth: 2, spanGaps: false },
+    ];
+
+    // Barres verticales : le second jeu de données (évènements/alertes), commun
+    // à tous les graphes. La courbe se brise toujours sur les relevés nuls (coupures).
+    const markers = eventMarkers();
+
+    const cfg = {
+        type: "line",
+        data: { labels, datasets },
+        plugins: [eventLinesPlugin],
+        options: {
+            responsive: true,
+            maintainAspectRatio: false,
+            interaction: { mode: "index", intersect: false },
+            scales: {
+                x: {
+                    type: "time",
+                    time: { tooltipFormat: "dd/MM HH:mm:ss", displayFormats: { minute: "HH:mm", hour: "dd/MM HH:mm", day: "dd/MM" } },
+                    ticks: { color: "#94a3b8", maxRotation: 0, autoSkipPadding: 20 },
+                    grid: { color: "rgba(148,163,184,.08)" }
+                },
+                y: {
+                    min: 0, max: 100,
+                    ticks: { color: "#94a3b8", callback: v => v + " %" },
+                    grid: { color: "rgba(148,163,184,.08)" }
+                }
+            },
+            plugins: {
+                legend: { labels: { color: "#e2e8f0", usePointStyle: true, boxWidth: 8 } },
+                tooltip: { callbacks: { label: c => `${c.dataset.label}: ${c.parsed.y === null ? "—" : c.parsed.y.toFixed(1)} %` } }
+            }
+        }
+    };
+
+    if (chart) {
+        // Mise à jour « en place » : on ne remplace ni l'objet data ni options
+        // (ce qui forçait Chart.js à tout réanimer => effet de rechargement).
+        // On réinjecte seulement labels + données, puis update sans animation.
+        chart.data.labels = labels;
+        datasets.forEach((ds, i) => {
+            if (chart.data.datasets[i]) chart.data.datasets[i].data = ds.data;
+            else chart.data.datasets[i] = ds;
+        });
+        chart.$eventMarkers = markers;
+        chart.update("none");
+    } else {
+        chart = new Chart(document.getElementById("chart"), cfg);
+        chart.$eventMarkers = markers;
+        chart.update();
+    }
+}
+
+function updateCards(samples) {
+    // Ignore les marqueurs d'évènement (relevés nuls) pour les indicateurs.
+    const valid = samples.filter(s => s.cpu_percent !== null && s.cpu_percent !== undefined);
+    document.getElementById("card-count").textContent = valid.length;
+    if (!valid.length) {
+        document.getElementById("card-cpu-sub").textContent = "Aucune donnée pour le moment";
+        return;
+    }
+    const last = valid[valid.length - 1];
+    document.getElementById("card-cpu").textContent = pct(last.cpu_percent);
+    document.getElementById("card-cpu-sub").textContent = "dernier relevé";
+    document.getElementById("card-mem").textContent = pct(last.mem_percent);
+    document.getElementById("card-mem-sub").textContent =
+        (last.mem_used_gb ?? "?") + " / " + (last.mem_total_gb ?? "?") + " Go";
+    document.getElementById("card-disk").textContent = pct(last.disk_percent);
+    document.getElementById("card-disk-sub").textContent =
+        (last.disk_used_gb ?? "?") + " / " + (last.disk_total_gb ?? "?") + " Go";
+    document.getElementById("card-updated").textContent = "MàJ : " + last.timestamp;
+}
+
+async function fetchHostInfo() {
+    try {
+        const r = await fetch(`${API}/api/hostinfo`);
+        if (!r.ok) return;
+        const d = await r.json();
+        document.getElementById("si-host").textContent = d.hostname || "—";
+        document.getElementById("si-boot").textContent =
+            d.boot_time ? luxon.DateTime.fromFormat(d.boot_time, "yyyy-MM-dd HH:mm:ss").toFormat("dd/MM/yyyy HH:mm:ss") : "—";
+        // Synchronise l'horloge locale sur l'heure système renvoyée par le serveur.
+        if (d.now) {
+            clockBase = {
+                serverMs: luxon.DateTime.fromFormat(d.now, "yyyy-MM-dd HH:mm:ss").toMillis(),
+                localMs: Date.now()
+            };
+            tickClock();
+        }
+    } catch (e) { /* ignore : bandeau conservé en l'état */ }
+}
+
+function tickClock() {
+    if (!clockBase) return;
+    const ms = clockBase.serverMs + (Date.now() - clockBase.localMs);
+    document.getElementById("si-now").textContent =
+        luxon.DateTime.fromMillis(ms).toFormat("dd/MM/yyyy HH:mm:ss");
+}
+
+// Paramètres de requête /api/history selon le mode courant.
+function currentParams() {
+    if (intervalMode) {
+        const p = {};
+        const deb = toApiDate(document.getElementById("date_deb").value);
+        const fin = toApiDate(document.getElementById("date_fin").value);
+        if (deb) p.date_deb = deb;
+        if (fin) p.date_fin = fin;
+        return p;
+    }
+    return { hours: document.getElementById("range").value };
+}
+
+// (Re)dessine le graphe et les cartes à partir du cache client.
+function render() {
+    buildChart(state.samples);
+    updateCards(state.samples);
+}
+
+function setConnected() {
+    document.getElementById("foot-status").innerHTML =
+        '<span class="dot pulse" style="background:var(--ok)"></span>Connecté';
+}
+function setOffline(e) {
+    document.getElementById("foot-status").innerHTML =
+        '<span class="dot" style="background:var(--err)"></span>Hors ligne : ' + e.message;
+}
+
+// En mode période, retire du cache les relevés sortis de la fenêtre glissante.
+function trimWindow() {
+    if (intervalMode) return;
+    const hours = parseFloat(document.getElementById("range").value);
+    if (!hours || hours <= 0) return;   // "Tout" : aucun élagage
+    const cutoff = serverNowMs() - hours * 3600 * 1000;
+    state.samples = state.samples.filter(s => tsToMs(s.timestamp) >= cutoff);
+    state.seenIds = new Set(state.samples.map(s => s.id));
+}
+
+// Chargement complet : remplace tout le cache (changement de fenêtre, 1er affichage,
+// rafraîchissement manuel). Une seule requête, ensuite tout se passe côté client.
+async function loadFull() {
+    try {
+        const data = await fetchHistory(currentParams());
+        state.samples = data.samples;
+        state.seenIds = new Set(data.samples.map(s => s.id));
+        render();
+        fetchHostInfo();   // resynchronise hôte / boot / horloge
+        setConnected();
+    } catch (e) {
+        setOffline(e);
+    }
+    // 2e section : supervision Mirth (historique processus + live + API REST).
+    loadMirthFull();
+    fetchMirthProcess();
+    fetchMirthOverview();
+    // Évènements/alertes : second jeu de données superposé aux deux graphes.
+    loadEventsFull();
+}
+
+// Chargement incrémental (auto-rafraîchissement) : ne demande au serveur que les
+// relevés postérieurs au dernier point connu, les ajoute au cache, puis redessine.
+// Limite la charge sur la machine analysée (petite requête au lieu de toute la fenêtre).
+async function loadIncremental() {
+    if (intervalMode || !state.samples.length) return loadFull();
+    try {
+        const last = state.samples[state.samples.length - 1].timestamp;
+        const data = await fetchHistory({ date_deb: last });
+        // Dédoublonnage par id (date_deb est inclusif : le dernier point revient).
+        for (const s of data.samples) {
+            if (!state.seenIds.has(s.id)) {
+                state.samples.push(s);
+                state.seenIds.add(s.id);
+            }
+        }
+        trimWindow();
+        render();
+        setConnected();
+    } catch (e) {
+        setOffline(e);
+    }
+    // 2e section : relevés incrémentaux du processus Mirth + instantané live.
+    loadMirthIncremental();
+    fetchMirthProcess();
+    // Évènements/alertes incrémentaux (barres superposées aux deux graphes).
+    loadEventsIncremental();
+}
+
+// =====================================================================
+// SUPERVISION MIRTH (2e section) : processus mirth.exe + API REST Mirth
+// =====================================================================
+
+// Construit/maj le graphe du processus Mirth : CPU % et Mémoire % sur l'axe
+// gauche (0-100), nombre de sockets sur un axe droit dédié (échelle libre).
+function buildMirthChart(samples) {
+    const labels = samples.map(s => luxon.DateTime.fromFormat(s.timestamp, "yyyy-MM-dd HH:mm:ss").toJSDate());
+    // Les courbes restent affichées même lorsque le processus est arrêté : les
+    // relevés nuls sont ramenés à 0 (ligne continue au plancher) plutôt que de
+    // briser la courbe. Les transitions start/stop sont signalées par les barres
+    // d'évènements superposées (jeu de données 'events').
+    const cpu  = samples.map(s => s.cpu_percent ?? 0);
+    const mem  = samples.map(s => s.mem_percent ?? 0);
+    const sock = samples.map(s => s.sockets ?? 0);
+
+    const datasets = [
+        { label: "CPU %",     data: cpu,  borderColor: "#38bdf8", backgroundColor: "rgba(56,189,248,.12)", tension: .25, fill: true, pointRadius: 0, borderWidth: 2, spanGaps: true, yAxisID: "y" },
+        { label: "Mémoire %", data: mem,  borderColor: "#a78bfa", backgroundColor: "rgba(167,139,250,.10)", tension: .25, fill: true, pointRadius: 0, borderWidth: 2, spanGaps: true, yAxisID: "y" },
+        { label: "Sockets",   data: sock, borderColor: "#2dd4bf", backgroundColor: "rgba(45,212,191,.10)",  tension: .25, fill: false, pointRadius: 0, borderWidth: 2, spanGaps: true, yAxisID: "ySock" },
+    ];
+
+    const cfg = {
+        type: "line",
+        data: { labels, datasets },
+        plugins: [eventLinesPlugin],
+        options: {
+            responsive: true,
+            maintainAspectRatio: false,
+            interaction: { mode: "index", intersect: false },
+            scales: {
+                x: {
+                    type: "time",
+                    time: { tooltipFormat: "dd/MM HH:mm:ss", displayFormats: { minute: "HH:mm", hour: "dd/MM HH:mm", day: "dd/MM" } },
+                    ticks: { color: "#94a3b8", maxRotation: 0, autoSkipPadding: 20 },
+                    grid: { color: "rgba(148,163,184,.08)" }
+                },
+                y: {
+                    min: 0, max: 100, position: "left",
+                    ticks: { color: "#94a3b8", callback: v => v + " %" },
+                    grid: { color: "rgba(148,163,184,.08)" }
+                },
+                ySock: {
+                    min: 0, position: "right",
+                    title: { display: true, text: "sockets", color: "#2dd4bf" },
+                    ticks: { color: "#2dd4bf", precision: 0 },
+                    grid: { drawOnChartArea: false }
+                }
+            },
+            plugins: {
+                legend: { labels: { color: "#e2e8f0", usePointStyle: true, boxWidth: 8 } },
+                tooltip: { callbacks: { label: c => {
+                    if (c.parsed.y === null) return `${c.dataset.label}: —`;
+                    return c.dataset.label === "Sockets"
+                        ? `${c.dataset.label}: ${c.parsed.y}`
+                        : `${c.dataset.label}: ${c.parsed.y.toFixed(1)} %`;
+                } } }
+            }
+        }
+    };
+
+    const markers = eventMarkers();
+    if (mirthChart) {
+        // Mise à jour « en place » sans animation (cf. buildChart) pour éviter
+        // l'effet de rechargement à chaque rafraîchissement.
+        mirthChart.data.labels = labels;
+        datasets.forEach((ds, i) => {
+            if (mirthChart.data.datasets[i]) mirthChart.data.datasets[i].data = ds.data;
+            else mirthChart.data.datasets[i] = ds;
+        });
+        mirthChart.$eventMarkers = markers;
+        mirthChart.update("none");
+    } else {
+        mirthChart = new Chart(document.getElementById("mirthChart"), cfg);
+        mirthChart.$eventMarkers = markers;
+        mirthChart.update();
+    }
+}
+
+// Met à jour les cartes du processus à partir d'un instantané live (/api/mirth/process).
+function setMirthCards(d) {
+    const found = d && d.found;
+    document.getElementById("mp-cpu").textContent = found ? pct(d.cpu_percent) : "—";
+    document.getElementById("mp-cpu-sub").textContent = found ? "live" : "processus arrêté";
+    document.getElementById("mp-mem").textContent = found ? pct(d.mem_percent) : "—";
+    document.getElementById("mp-mem-sub").textContent =
+        found && d.mem_used_gb != null ? d.mem_used_gb + " Go utilisés" : "";
+    document.getElementById("mp-sock").textContent = found && d.sockets != null ? d.sockets : "—";
+    document.getElementById("mp-sock-sub").textContent = found ? "ports + connexions" : "";
+
+    const stateEl = document.getElementById("mp-state");
+    const subEl = document.getElementById("mp-state-sub");
+    if (found) {
+        stateEl.innerHTML = '<span class="badge on">● Actif</span>';
+        subEl.textContent = (d.process || "mirth") + " — PID " + (d.pids || []).join(", ");
+    } else {
+        stateEl.innerHTML = '<span class="badge off">● Arrêté</span>';
+        subEl.textContent = (d && d.process ? d.process : "mirth.exe") + " introuvable";
+    }
+}
+
+// Rendu (graphe) du processus Mirth depuis le cache.
+function renderMirth() { buildMirthChart(mirthState.samples); }
+
+// Élagage de la fenêtre glissante (mode période) pour le cache mirth.
+function trimMirthWindow() {
+    if (intervalMode) return;
+    const hours = parseFloat(document.getElementById("range").value);
+    if (!hours || hours <= 0) return;
+    const cutoff = serverNowMs() - hours * 3600 * 1000;
+    mirthState.samples = mirthState.samples.filter(s => tsToMs(s.timestamp) >= cutoff);
+    mirthState.seenIds = new Set(mirthState.samples.map(s => s.id));
+}
+
+// Chargement complet de l'historique du processus Mirth (tag 'mirth').
+async function loadMirthFull() {
+    try {
+        const p = currentParams();
+        p.tag = "mirth";
+        const data = await fetchHistory(p);
+        mirthState.samples = data.samples;
+        mirthState.seenIds = new Set(data.samples.map(s => s.id));
+        renderMirth();
+    } catch (e) { /* la section système gère déjà le bandeau hors-ligne */ }
+}
+
+// Chargement incrémental de l'historique mirth (auto-rafraîchissement).
+async function loadMirthIncremental() {
+    if (intervalMode || !mirthState.samples.length) return loadMirthFull();
+    try {
+        const last = mirthState.samples[mirthState.samples.length - 1].timestamp;
+        const data = await fetchHistory({ tag: "mirth", date_deb: last });
+        for (const s of data.samples) {
+            if (!mirthState.seenIds.has(s.id)) {
+                mirthState.samples.push(s);
+                mirthState.seenIds.add(s.id);
+            }
+        }
+        trimMirthWindow();
+        renderMirth();
+    } catch (e) { /* ignore */ }
+}
+
+// Instantané live du processus (cartes).
+async function fetchMirthProcess() {
+    try {
+        const r = await fetch(`${API}/api/mirth/process`);
+        if (!r.ok) return;
+        setMirthCards(await r.json());
+    } catch (e) { /* ignore */ }
+}
+
+// Vue d'ensemble de l'API REST Mirth (bandeau + table des canaux).
+async function fetchMirthOverview() {
+    const statusEl = document.getElementById("ma-status");
+    try {
+        const r = await fetch(`${API}/api/mirth/api`);
+        const d = await r.json();
+        document.getElementById("ma-url").textContent = d.base_url || "—";
+        if (!d.reachable) {
+            statusEl.innerHTML = '<span class="badge off">injoignable</span>';
+            document.getElementById("ma-version").textContent = "—";
+            document.getElementById("ma-channels").textContent = "—";
+            renderChannels([], d.error);
+            return;
+        }
+        statusEl.innerHTML = '<span class="badge on">connectée</span>';
+        document.getElementById("ma-version").textContent = d.version || "—";
+        document.getElementById("ma-channels").textContent =
+            (d.channels_started ?? 0) + " / " + (d.channel_count ?? 0);
+        renderChannels(d.channels || [], null);
+    } catch (e) {
+        statusEl.innerHTML = '<span class="badge off">injoignable</span>';
+        renderChannels([], e.message);
+    }
+}
+
+// Construit le corps de la table des canaux Mirth.
+function renderChannels(channels, error) {
+    const body = document.getElementById("channels-body");
+    const note = document.getElementById("channels-note");
+    const num = v => (v === null || v === undefined) ? "—" : v;
+    const stateBadge = st => {
+        const s = (st || "").toUpperCase();
+        if (s === "STARTED") return '<span class="badge on">démarré</span>';
+        if (s === "STOPPED") return '<span class="badge off">arrêté</span>';
+        if (s === "PAUSED")  return '<span class="badge warn">en pause</span>';
+        return '<span class="badge idle">' + (st || "—") + '</span>';
+    };
+
+    if (!channels.length) {
+        body.innerHTML = '<tr><td colspan="7" class="muted-note">' +
+            (error ? "API Mirth indisponible : " + error : "Aucun canal déployé.") + '</td></tr>';
+        note.textContent = "";
+        return;
+    }
+    body.innerHTML = channels.map(c =>
+        `<tr>
+            <td>${c.name || c.channel_id || "—"}</td>
+            <td>${stateBadge(c.state)}</td>
+            <td class="num">${num(c.received)}</td>
+            <td class="num">${num(c.filtered)}</td>
+            <td class="num">${num(c.queued)}</td>
+            <td class="num">${num(c.sent)}</td>
+            <td class="num">${num(c.error)}</td>
+        </tr>`).join("");
+    note.textContent = channels.length + " canal(aux) — statistiques cumulées depuis le dernier reset Mirth.";
+}
+
+function setupAuto() {
+    if (autoTimer) clearInterval(autoTimer);
+    if (mirthOverviewTimer) clearInterval(mirthOverviewTimer);
+    // L'auto-rafraîchissement n'a de sens qu'en mode période (intervalle figé).
+    if (!intervalMode && document.getElementById("autorefresh").checked) {
+        autoTimer = setInterval(loadIncremental, 30000); // toutes les 30 s
+        // L'API REST Mirth est interrogée moins souvent (login à chaque appel).
+        mirthOverviewTimer = setInterval(fetchMirthOverview, 60000);
+    }
+}
+
+// Met à jour le résumé affiché dans l'en-tête (mode courant).
+function updateRangeSummary() {
+    const el = document.getElementById("range-summary");
+    const auto = document.getElementById("autorefresh").checked;
+    if (intervalMode) {
+        const deb = document.getElementById("date_deb").value.replace("T", " ");
+        const fin = document.getElementById("date_fin").value.replace("T", " ");
+        el.innerHTML = `Intervalle : <b>${deb || "…"} → ${fin || "…"}</b>`;
+    } else {
+        const sel = document.getElementById("range");
+        const txt = sel.options[sel.selectedIndex].textContent;
+        el.innerHTML = `Période : <b>${txt}</b>` + (auto ? " · auto ↻" : "");
+    }
+}
+
+// Bascule vers le mode intervalle de dates.
+function enterIntervalMode() {
+    const deb = document.getElementById("date_deb").value;
+    const fin = document.getElementById("date_fin").value;
+    if (!deb && !fin) {
+        alert("Renseignez au moins une date (début ou fin) pour l'intervalle.");
+        return;
+    }
+    intervalMode = true;
+    document.getElementById("range").disabled = true;
+    document.getElementById("clearInterval").style.display = "";
+    setupAuto();   // stoppe l'auto-rafraîchissement
+    updateRangeSummary();
+    closeRangeModal();
+    loadFull();
+}
+
+// Revient au mode période (dernières heures).
+function exitIntervalMode() {
+    intervalMode = false;
+    document.getElementById("range").disabled = false;
+    document.getElementById("clearInterval").style.display = "none";
+    setupAuto();
+    updateRangeSummary();
+    loadFull();
+}
+
+// ---------- Modale Période & intervalle ----------
+function openRangeModal()  { document.getElementById("range-modal").classList.add("open"); }
+function closeRangeModal() { document.getElementById("range-modal").classList.remove("open"); }
+
+document.getElementById("openRange").addEventListener("click", openRangeModal);
+document.getElementById("closeRange").addEventListener("click", closeRangeModal);
+document.getElementById("range-modal").addEventListener("click", e => {
+    if (e.target.id === "range-modal") closeRangeModal();   // clic sur le fond
+});
+document.addEventListener("keydown", e => {
+    if (e.key === "Escape") closeRangeModal();
+});
+
+document.getElementById("refresh").addEventListener("click", loadFull);
+document.getElementById("range").addEventListener("change", () => { updateRangeSummary(); loadFull(); });
+document.getElementById("autorefresh").addEventListener("change", () => { setupAuto(); updateRangeSummary(); });
+document.getElementById("applyInterval").addEventListener("click", enterIntervalMode);
+document.getElementById("clearInterval").addEventListener("click", exitIntervalMode);
+
+setInterval(tickClock, 1000);   // horloge système qui défile entre deux refresh
+updateRangeSummary();
+fetchHostInfo();
+loadFull();
+setupAuto();
+</script>
+</body>
+</html>
