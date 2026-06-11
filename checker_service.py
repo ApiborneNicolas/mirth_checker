@@ -31,17 +31,19 @@ import datetime
 from tabulate import tabulate
 
 # --- Import des librairies internes (dossier lib/) -------------------------
-from lib import database, webserver, mirth_api
+from lib import database, webserver
 from lib.scheduler import RecurringTask, start_staggered
 
 # --- Import des scripts existants en tant que librairies -------------------
 import system_state
 import mirth_logs_parser
+import mirth_api
 import quickmail
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 WEB_DIR = os.path.join(BASE_DIR, "web")
-DEFAULT_LOGFILE = os.path.join(BASE_DIR, "Ressources", "mirth-exemple.log")
+# Emplacement standard du log serveur de Mirth Connect sous Windows.
+DEFAULT_LOGFILE = r"C:\Program Files\Mirth Connect\logs\mirthconnect.log"
 
 # Lecteur système surveillé pour le stockage (C:\ sous Windows, / sinon)
 SYSTEM_DRIVE = os.environ.get("SystemDrive", "C:") + os.sep if os.name == "nt" else "/"
@@ -875,17 +877,51 @@ def api_mirth(req):
 # ==========================================================================
 # API : SUPERVISION MIRTH (API REST Mirth + processus mcservice.exe)
 # ==========================================================================
+def _mirth_timeout(req):
+    """Lit le paramètre ?timeout=… (secondes), avec repli sur 8 s."""
+    try:
+        return float(req.get("timeout", 8))
+    except ValueError:
+        return 8
+
+
 def api_mirth_api(req):
     """Vue d'ensemble du serveur Mirth via son API REST.
 
-    Renvoie version, statistiques système (JVM) et statuts des canaux. En cas de
-    serveur injoignable : {"reachable": false, "error": ...} (HTTP 200).
+    Renvoie version, statistiques système (JVM), statuts des canaux et totaux
+    agrégés. En cas de serveur injoignable : {"reachable": false, "error": ...}
+    (HTTP 200).
     """
-    try:
-        timeout = float(req.get("timeout", 8))
-    except ValueError:
-        timeout = 8
-    return mirth_api.get_overview(timeout=timeout)
+    return mirth_api.get_overview(timeout=_mirth_timeout(req))
+
+
+def api_mirth_channels(req):
+    """Liste des canaux Mirth et de leurs statistiques (vue allégée).
+
+    Filtre optionnel ?channel=<texte> sur le nom du canal (insensible à la casse).
+    """
+    data = mirth_api.get_channels_overview(timeout=_mirth_timeout(req))
+    flt = (req.get("channel") or "").strip().lower()
+    if flt and data.get("channels"):
+        data["channels"] = [c for c in data["channels"]
+                            if flt in (c.get("name") or "").lower()]
+        data["channel_count"] = len(data["channels"])
+    return data
+
+
+def api_mirth_stats(req):
+    """Statistiques agrégées sur l'ensemble des canaux (totaux + compteurs)."""
+    return mirth_api.get_global_statistics(timeout=_mirth_timeout(req))
+
+
+def api_mirth_server(req):
+    """Version, infos JVM/OS et statistiques système du serveur Mirth."""
+    return mirth_api.get_server_info(timeout=_mirth_timeout(req))
+
+
+def api_mirth_errors(req):
+    """Canaux Mirth en erreur (statistique ERROR > 0 ou état d'erreur)."""
+    return mirth_api.get_errors(timeout=_mirth_timeout(req))
 
 
 def api_mirth_process(req):
@@ -893,6 +929,90 @@ def api_mirth_process(req):
     p = probe_mirth_process()
     p["latest"] = database.get_latest(tag=TAG_MIRTH)
     return p
+
+
+# Types d'informations Mirth disponibles pour /api/getmirthinfo.
+MIRTHINFO_TYPES = ["server", "stats", "channels", "errors"]
+
+
+def api_getmirthinfo(req):
+    """Infos Mirth (API REST) à la demande — multi-format json/text/html.
+
+    Paramètres :
+      ?type=server,stats,channels,errors  (liste ; vide => toutes)
+      &channel=<texte>                     (filtre sur le nom de canal)
+      &timeout=8                           (délai réseau en secondes)
+      &format=json|text|html               (json par défaut)
+
+    Même modèle que /api/getsysteminfo : une seule interrogation du serveur
+    Mirth alimente toutes les sections demandées.
+    """
+    raw = req.get("type", "")
+    types = [t.strip().lower() for t in raw.split(",") if t.strip()]
+    types = [t for t in types if t in MIRTHINFO_TYPES] or MIRTHINFO_TYPES
+    fmt = req.get("format", "json")
+
+    ov = mirth_api.get_overview(timeout=_mirth_timeout(req))
+    if not ov.get("reachable"):
+        section = {"key": "mirth", "title": "Serveur Mirth injoignable",
+                   "headers": ["Indicateur", "Valeur"],
+                   "rows": [["URL", ov.get("base_url")], ["Erreur", ov.get("error")]],
+                   "data": ov}
+        return _render_sections([section], fmt, title="Infos Mirth")
+
+    channels = ov.get("channels", [])
+    flt = (req.get("channel") or "").strip().lower()
+    if flt:
+        channels = [c for c in channels if flt in (c.get("name") or "").lower()]
+
+    sections = []
+    for key in types:
+        if key == "server":
+            info = ov.get("system_info") or {}
+            rows = [["URL de l'API", ov.get("base_url")],
+                    ["Version Mirth", ov.get("version") or "-"]]
+            for label, k in (("OS", "osName"), ("OS (version)", "osVersion"),
+                             ("JVM", "jvmVersion")):
+                if k in info:
+                    rows.append([label, info.get(k)])
+            sections.append({"key": "server", "title": "Serveur Mirth",
+                             "headers": ["Indicateur", "Valeur"], "rows": rows,
+                             "data": {"base_url": ov.get("base_url"),
+                                      "version": ov.get("version"),
+                                      "system_info": ov.get("system_info"),
+                                      "system_stats": ov.get("system_stats")}})
+        elif key == "stats":
+            totals = mirth_api.compute_totals(channels)
+            rows = [["Canaux", f"{ov.get('channels_started', 0)} / {len(channels)}"],
+                    ["Reçus", totals["received"]], ["Filtrés", totals["filtered"]],
+                    ["En file", totals["queued"]], ["Envoyés", totals["sent"]],
+                    ["Erreurs", totals["error"]]]
+            sections.append({"key": "stats", "title": "Statistiques globales",
+                             "headers": ["Indicateur", "Valeur"], "rows": rows,
+                             "data": {"totals": totals,
+                                      "channel_count": len(channels),
+                                      "channels_started": ov.get("channels_started")}})
+        elif key == "channels":
+            ordered = sorted(channels, key=lambda c: (c.get("name") or "").lower())
+            rows = [[c.get("name") or "-", c.get("state") or "-",
+                     c.get("received"), c.get("filtered"), c.get("queued"),
+                     c.get("sent"), c.get("error")] for c in ordered]
+            sections.append({"key": "channels", "title": "Canaux",
+                             "headers": ["Canal", "État", "Reçus", "Filtrés",
+                                         "En file", "Envoyés", "Erreurs"],
+                             "rows": rows, "data": ordered})
+        elif key == "errors":
+            faulty = [c for c in channels
+                      if (isinstance(c.get("error"), int) and c["error"] > 0)
+                      or (c.get("state") or "").upper() in ("ERROR", "PAUSED")]
+            faulty.sort(key=lambda c: (c.get("error") or 0), reverse=True)
+            rows = [[c.get("name") or "-", c.get("state") or "-", c.get("error")]
+                    for c in faulty] or [["(aucun canal en erreur)", "", ""]]
+            sections.append({"key": "errors", "title": "Canaux en erreur",
+                             "headers": ["Canal", "État", "Erreurs"],
+                             "rows": rows, "data": faulty})
+
+    return _render_sections(sections, fmt, title="Infos Mirth")
 
 
 # ==========================================================================
@@ -990,7 +1110,12 @@ def build_router(tasks, started_at):
 
     # API supervision Mirth (API REST + processus)
     router.get("/api/mirth/api", api_mirth_api)
+    router.get("/api/mirth/channels", api_mirth_channels)
+    router.get("/api/mirth/stats", api_mirth_stats)
+    router.get("/api/mirth/server", api_mirth_server)
+    router.get("/api/mirth/errors", api_mirth_errors)
     router.get("/api/mirth/process", api_mirth_process)
+    router.get("/api/getmirthinfo", api_getmirthinfo)
 
     # API email
     router.post("/api/mail", api_mail)

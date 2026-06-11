@@ -573,10 +573,10 @@ if __name__ == '__main__':
     def main():
         parser = argparse.ArgumentParser(description="Parse Mirth log files and display statistics.")
         parser.add_argument(
-            "logfile", 
-            nargs="?", 
-            default=r"Ressources\mirth-exemple.log",
-            help=r"Path to the Mirth log file (default: Ressources\mirth-exemple.log)"
+            "logfile",
+            nargs="?",
+            default=r"C:\Program Files\Mirth Connect\logs\mirthconnect.log",
+            help=r"Path to the Mirth log file (default: C:\Program Files\Mirth Connect\logs\mirthconnect.log)"
         )
         parser.add_argument(
             "-d", "--date",

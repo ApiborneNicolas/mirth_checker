@@ -34,7 +34,21 @@
         nav a { color: var(--accent); font-size: 14px; text-decoration: none; margin-left: 16px; }
         nav a:hover { text-decoration: underline; }
         .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 18px; align-items: start; }
-        @media (max-width: 900px) { .grid { grid-template-columns: 1fr; } }
+        /* Colonne droite : épinglée et haute comme la fenêtre pour maximiser la
+           place donnée à la zone de réponse (textarea/aperçu). La hauteur retire,
+           en plus des marges (48px), la bande d'en-tête (~62px) qui pousse la
+           colonne vers le bas — sans quoi elle dépasserait le bas du viewport. */
+        .right-col { position: sticky; top: 24px; height: calc(100vh - 110px); }
+        .right-col .resp-panel {
+            display: flex; flex-direction: column; height: 100%; margin-bottom: 0;
+        }
+        @media (max-width: 900px) {
+            .grid { grid-template-columns: 1fr; }
+            /* En une seule colonne, on rend la hauteur au flux normal. */
+            .right-col { position: static; height: auto; }
+            .right-col .resp-panel { height: auto; }
+            #resp-body, .render-frame { min-height: 320px; }
+        }
         .panel {
             background: var(--panel);
             border: 1px solid var(--border);
@@ -101,14 +115,30 @@
         .meta .cell { background: var(--panel-2); border-radius: 8px; padding: 9px 12px; }
         .meta .k { font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: .03em; }
         .meta .v { font-size: 15px; font-weight: 600; margin-top: 3px; word-break: break-word; }
-        #resp-body { min-height: 320px; font-family: "Cascadia Code", Consolas, monospace; font-size: 13px; }
+        #resp-body { flex: 1 1 auto; min-height: 120px; font-family: "Cascadia Code", Consolas, monospace; font-size: 13px; }
         .status-ok { color: var(--ok); }
         .status-err { color: var(--err); }
         .hint { font-size: 12px; color: var(--muted); margin-top: 6px; }
         .render-frame {
-            width: 100%; min-height: 320px; border: 1px solid #475569; border-radius: 6px;
+            width: 100%; flex: 1 1 auto; min-height: 120px; border: 1px solid #475569; border-radius: 6px;
             background: #fff; display: none;
         }
+        /* Overlay « traitement en cours » superposé à la section Réponse. */
+        .resp-panel { position: relative; }
+        .overlay {
+            position: absolute; inset: 0; border-radius: 10px; z-index: 5;
+            background: rgba(15,23,42,.78); backdrop-filter: blur(2px);
+            display: none; flex-direction: column; align-items: center;
+            justify-content: center; gap: 14px;
+            color: var(--text); font-size: 14px; font-weight: 600;
+        }
+        .overlay.show { display: flex; }
+        .spinner {
+            width: 44px; height: 44px; border-radius: 50%;
+            border: 4px solid rgba(148,163,184,.25); border-top-color: var(--accent);
+            animation: spin .8s linear infinite;
+        }
+        @keyframes spin { to { transform: rotate(360deg); } }
     </style>
 </head>
 <body>
@@ -152,8 +182,12 @@
         </div>
 
         <!-- ================= COLONNE DROITE : RÉPONSE ================= -->
-        <div>
-            <div class="panel">
+        <div class="right-col">
+            <div class="panel resp-panel">
+                <div class="overlay" id="resp-overlay">
+                    <div class="spinner"></div>
+                    <div>Traitement en cours…</div>
+                </div>
                 <h2>Réponse</h2>
                 <div class="meta">
                     <div class="cell"><div class="k">Statut</div><div class="v" id="r-status">—</div></div>
@@ -253,8 +287,31 @@ const ENDPOINTS = [
           { name: "rotate", kind: "bool", label: "Inclure les fichiers logrotate" }
       ] },
     { id: "/api/mirth/api", method: "GET", cat: "Mirth", label: "Mirth — API REST",
-      desc: "Vue d'ensemble du serveur Mirth via son API REST (version, stats JVM, statuts des canaux). reachable=false si le serveur est injoignable.",
+      desc: "Vue d'ensemble du serveur Mirth via son API REST (version, stats JVM, statuts des canaux, totaux agrégés). reachable=false si le serveur est injoignable.",
       params: [ { name: "timeout", kind: "number", label: "Timeout (s)", default: "8" } ] },
+    { id: "/api/mirth/channels", method: "GET", cat: "Mirth", label: "Mirth — Canaux",
+      desc: "Liste des canaux Mirth et de leurs statistiques (reçus, filtrés, en file, envoyés, erreurs).",
+      params: [
+          { name: "channel", kind: "text", label: "Filtre nom de canal", placeholder: "(tous)" },
+          { name: "timeout", kind: "number", label: "Timeout (s)", default: "8" }
+      ] },
+    { id: "/api/mirth/stats", method: "GET", cat: "Mirth", label: "Mirth — Statistiques globales",
+      desc: "Statistiques agrégées sur l'ensemble des canaux (totaux + compteurs d'état).",
+      params: [ { name: "timeout", kind: "number", label: "Timeout (s)", default: "8" } ] },
+    { id: "/api/mirth/server", method: "GET", cat: "Mirth", label: "Mirth — Serveur",
+      desc: "Version, informations JVM/OS et statistiques système du serveur Mirth.",
+      params: [ { name: "timeout", kind: "number", label: "Timeout (s)", default: "8" } ] },
+    { id: "/api/mirth/errors", method: "GET", cat: "Mirth", label: "Mirth — Canaux en erreur",
+      desc: "Canaux présentant des erreurs (statistique ERROR > 0) ou un état d'erreur.",
+      params: [ { name: "timeout", kind: "number", label: "Timeout (s)", default: "8" } ] },
+    { id: "/api/getmirthinfo", method: "GET", cat: "Mirth", label: "Infos Mirth (multi-format)",
+      desc: "Infos Mirth à la demande (json/text/html), une seule interrogation du serveur alimente toutes les sections.",
+      params: [
+          { name: "type", kind: "text", label: "Sections (server,stats,channels,errors)", placeholder: "(toutes)" },
+          { name: "channel", kind: "text", label: "Filtre nom de canal", placeholder: "(tous)" },
+          { name: "timeout", kind: "number", label: "Timeout (s)", default: "8" },
+          { name: "format", kind: "select", label: "Format", options: ["json","text","html"], default: "json" }
+      ] },
     { id: "/api/mirth/process", method: "GET", cat: "Mirth", label: "Mirth — Processus",
       desc: "Instantané live du processus Mirth (mcservice.exe) : CPU, mémoire et nombre de sockets.", params: [] },
     { id: "/api/status", method: "GET", cat: "Service", label: "Statut du service", desc: "État du service et du planificateur.", params: [] },
@@ -479,10 +536,14 @@ function classifyType(ctype) {
     return { label: "Fichier", ext: "bin" };
 }
 
+// Affiche / masque l'overlay « traitement en cours » sur la section Réponse.
+function showOverlay(on) { $("resp-overlay").classList.toggle("show", on); }
+
 async function sendRequest() {
     const r = collectRequest();
     $("r-status").textContent = "…";
     $("r-status").className = "v";
+    showOverlay(true);
 
     const opts = { method: r.method };
     if (r.hasBody) {
@@ -505,6 +566,9 @@ async function sendRequest() {
         $("r-ctype").textContent = "Content-Type : —";
         $("resp-body").value = "Échec de la requête : " + e.message;
         return;
+    } finally {
+        // Garantit le masquage dans tous les cas (succès, échec réseau ou rendu).
+        showOverlay(false);
     }
     const dt = (performance.now() - t0).toFixed(0);
     const ctype = resp.headers.get("Content-Type") || "";

@@ -94,6 +94,7 @@
         }
         table.mtable th { color: var(--muted); font-weight: 600; text-transform: uppercase; letter-spacing: .03em; font-size: 11px; }
         table.mtable td.num { text-align: right; font-variant-numeric: tabular-nums; }
+        table.mtable tr.totals-row td { border-top: 2px solid #3a4761; border-bottom: none; background: rgba(148,163,184,.06); }
         .badge {
             display: inline-block; padding: 2px 8px; border-radius: 10px;
             font-size: 11px; font-weight: 600;
@@ -820,7 +821,7 @@ async function fetchMirthOverview() {
         document.getElementById("ma-version").textContent = d.version || "—";
         document.getElementById("ma-channels").textContent =
             (d.channels_started ?? 0) + " / " + (d.channel_count ?? 0);
-        renderChannels(d.channels || [], null);
+        renderChannels(d.channels || [], null, d.totals);
     } catch (e) {
         statusEl.innerHTML = '<span class="badge off">injoignable</span>';
         renderChannels([], e.message);
@@ -828,7 +829,7 @@ async function fetchMirthOverview() {
 }
 
 // Construit le corps de la table des canaux Mirth.
-function renderChannels(channels, error) {
+function renderChannels(channels, error, totals) {
     const body = document.getElementById("channels-body");
     const note = document.getElementById("channels-note");
     const num = v => (v === null || v === undefined) ? "—" : v;
@@ -846,7 +847,7 @@ function renderChannels(channels, error) {
         note.textContent = "";
         return;
     }
-    body.innerHTML = channels.map(c =>
+    let rows = channels.map(c =>
         `<tr>
             <td>${c.name || c.channel_id || "—"}</td>
             <td>${stateBadge(c.state)}</td>
@@ -856,6 +857,18 @@ function renderChannels(channels, error) {
             <td class="num">${num(c.sent)}</td>
             <td class="num">${num(c.error)}</td>
         </tr>`).join("");
+    // Ligne de totaux (statistiques agrégées tous canaux), si fournies par l'API.
+    if (totals) {
+        rows += `<tr class="totals-row">
+            <td><b>Total</b></td><td></td>
+            <td class="num"><b>${num(totals.received)}</b></td>
+            <td class="num"><b>${num(totals.filtered)}</b></td>
+            <td class="num"><b>${num(totals.queued)}</b></td>
+            <td class="num"><b>${num(totals.sent)}</b></td>
+            <td class="num"><b>${num(totals.error)}</b></td>
+        </tr>`;
+    }
+    body.innerHTML = rows;
     note.textContent = channels.length + " canal(aux) — statistiques cumulées depuis le dernier reset Mirth.";
 }
 
