@@ -20,6 +20,7 @@ Le service :
 Lancement :
     python checker_service.py [--host 0.0.0.0] [--port 8800] [--interval 60]
                               [--logfile chemin] [--no-browser]
+                              [--mirth-url URL] [--mirth-user ID] [--mirth-password PW]
 """
 
 import os
@@ -1143,11 +1144,26 @@ def main():
                              "en secondes (def: 5) — évite un pic de charge au tick")
     parser.add_argument("--logfile", default=DEFAULT_LOGFILE,
                         help="Fichier de log Mirth par défaut pour /api/mirth")
+    parser.add_argument("--mirth-url", default=None,
+                        help="URL de l'API REST Mirth (sinon env / .mirth_config.py / défaut)")
+    parser.add_argument("--mirth-user", default=None,
+                        help="Identifiant de connexion à l'API Mirth")
+    parser.add_argument("--mirth-password", default=None,
+                        help="Mot de passe de connexion à l'API Mirth")
     parser.add_argument("--no-browser", action="store_true",
                         help="Ne pas ouvrir le navigateur au démarrage")
     args = parser.parse_args()
 
     DEFAULT_LOGFILE = args.logfile
+
+    # Identifiants Mirth fournis en ligne de commande : injectés dans
+    # l'environnement, source la plus prioritaire pour mirth_api.get_config().
+    if args.mirth_url:
+        os.environ["MIRTH_BASE_URL"] = args.mirth_url
+    if args.mirth_user:
+        os.environ["MIRTH_USER"] = args.mirth_user
+    if args.mirth_password:
+        os.environ["MIRTH_PASSWORD"] = args.mirth_password
 
     # 1. Initialisation de la base
     database.init_db()

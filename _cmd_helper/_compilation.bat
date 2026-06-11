@@ -63,15 +63,19 @@ if not exist ".smtp_config.py" (
     echo [INFO] Creation de .smtp_config.py a partir de .smtp_config.py.template...
     copy ".smtp_config.py.template" ".smtp_config.py"
 )
-
+REM ---- Verification de la configuration Mirth ----
+if not exist ".mirth_config.py" (
+    echo [INFO] Creation de .mirth_config.py a partir de .mirth_config.py.template...
+    copy ".mirth_config.py.template" ".mirth_config.py"
+)
 REM ---- Compilation ----
 echo.
 echo [INFO] Compilation des scripts...
 %PYINSTALLER%  --onefile system_state.py
-%PYINSTALLER%  --onefile mirth_api.py
+%PYINSTALLER%  --onefile --add-data ".mirth_config.py;."mirth_api.py
 %PYINSTALLER%  --onefile --add-data ".smtp_config.py;." quickmail.py
 %PYINSTALLER%  --onefile --add-data ".smtp_config.py;." mirth_logs_parser.py
-%PYINSTALLER%  --onefile --add-data ".smtp_config.py;." checker_service.py
+%PYINSTALLER%  --onefile --add-data ".smtp_config.py;." --add-data ".mirth_config.py;." checker_service.py
 echo.
 echo [OK] Compilation terminee !
 

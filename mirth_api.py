@@ -634,7 +634,23 @@ if __name__ == "__main__":
     parser.add_argument("-c", "--channel", type=str, default=None,
                         help="Filtre : n'affiche que les canaux dont le nom "
                              "contient ce texte (insensible à la casse)")
+    parser.add_argument("-u", "--url", type=str, default=None,
+                        help="URL de base de l'API REST Mirth "
+                             "(déf: env / .mirth_config.py / https://localhost:8443/api)")
+    parser.add_argument("--user", type=str, default=None,
+                        help="Identifiant de connexion à l'API Mirth")
+    parser.add_argument("-p", "--password", type=str, default=None,
+                        help="Mot de passe de connexion à l'API Mirth")
     args = parser.parse_args()
+
+    # Les arguments fournis priment : on les injecte dans l'environnement, source
+    # de configuration la plus prioritaire pour get_config() (cf. MirthClient).
+    if args.url:
+        os.environ["MIRTH_BASE_URL"] = args.url
+    if args.user:
+        os.environ["MIRTH_USER"] = args.user
+    if args.password:
+        os.environ["MIRTH_PASSWORD"] = args.password
 
     wanted = [s.strip().lower() for s in args.sections.split(",") if s.strip()]
     if "all" in wanted or not wanted:
