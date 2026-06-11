@@ -4,150 +4,72 @@
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>Mirth Checker — Testeur d'API</title>
+    <!-- Thème (anti-flash : pose data-theme avant le rendu) -->
+    <script>
+        (function(){try{var t=localStorage.getItem("mc-theme");if(!t)t=matchMedia("(prefers-color-scheme: light)").matches?"light":"dark";document.documentElement.setAttribute("data-theme",t);}catch(e){document.documentElement.setAttribute("data-theme","dark");}})();
+    </script>
+    <link rel="stylesheet" href="theme.css">
+    <script src="theme.js" defer></script>
     <style>
-        :root {
-            --bg: #0f172a;
-            --panel: #1e293b;
-            --panel-2: #334155;
-            --border: #293548;
-            --text: #e2e8f0;
-            --muted: #94a3b8;
-            --accent: #38bdf8;
-            --accent-2: #a78bfa;
-            --ok: #22c55e;
-            --err: #ef4444;
-            --warn: #f59e0b;
-        }
-        * { box-sizing: border-box; }
-        body {
-            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Arial, sans-serif;
-            background: var(--bg);
-            color: var(--text);
-            margin: 0;
-            padding: 24px;
-        }
-        header {
-            display: flex; flex-wrap: wrap; align-items: center;
-            justify-content: space-between; gap: 12px; margin-bottom: 18px;
-        }
-        h1 { font-size: 22px; margin: 0; font-weight: 600; }
-        nav a { color: var(--accent); font-size: 14px; text-decoration: none; margin-left: 16px; }
-        nav a:hover { text-decoration: underline; }
+        /* --- Styles spécifiques au testeur d'API --- */
         .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 18px; align-items: start; }
         /* Colonne droite : épinglée et haute comme la fenêtre pour maximiser la
            place donnée à la zone de réponse (textarea/aperçu). La hauteur retire,
-           en plus des marges (48px), la bande d'en-tête (~62px) qui pousse la
-           colonne vers le bas — sans quoi elle dépasserait le bas du viewport. */
-        .right-col { position: sticky; top: 24px; height: calc(100vh - 110px); }
-        .right-col .resp-panel {
-            display: flex; flex-direction: column; height: 100%; margin-bottom: 0;
-        }
+           en plus des marges, la bande d'en-tête (sticky) qui pousse la colonne. */
+        .right-col { position: sticky; top: 84px; height: calc(100vh - 110px); }
+        .right-col .resp-panel { display: flex; flex-direction: column; height: 100%; margin-bottom: 0; }
         @media (max-width: 900px) {
             .grid { grid-template-columns: 1fr; }
-            /* En une seule colonne, on rend la hauteur au flux normal. */
             .right-col { position: static; height: auto; }
             .right-col .resp-panel { height: auto; }
             #resp-body, .render-frame { min-height: 320px; }
         }
-        .panel {
-            background: var(--panel);
-            border: 1px solid var(--border);
-            border-radius: 10px;
-            padding: 18px;
-            margin-bottom: 18px;
-        }
-        .panel h2 {
-            font-size: 15px; margin: 0 0 14px; font-weight: 600;
-            text-transform: uppercase; letter-spacing: .04em; color: var(--muted);
-        }
-        label { font-size: 13px; color: var(--muted); display: block; margin-bottom: 5px; }
-        select, input[type=text], input[type=number], textarea {
-            background: var(--panel-2);
-            color: var(--text);
-            border: 1px solid #475569;
-            border-radius: 6px;
-            padding: 8px 11px;
-            font-size: 14px;
-            width: 100%;
-            font-family: inherit;
-        }
-        textarea { resize: vertical; }
-        button {
-            background: var(--panel-2);
-            color: var(--text);
-            border: 1px solid #475569;
-            border-radius: 6px;
-            padding: 8px 14px;
-            font-size: 14px;
-            cursor: pointer;
-        }
-        button:hover { background: #475569; }
-        button.primary { background: var(--accent); color: #06243a; border-color: var(--accent); font-weight: 600; }
-        button.primary:hover { background: #7dd3fc; }
-        button.small { padding: 4px 10px; font-size: 12px; }
-        .field { margin-bottom: 14px; }
-        .field-row { display: flex; gap: 12px; }
-        .field-row .field { flex: 1; min-width: 0; }
+        .panel h2 { letter-spacing: .04em; }
         .endpoint-desc { font-size: 13px; color: var(--muted); margin: -6px 0 16px; line-height: 1.5; }
-        .method-badge {
-            display: inline-block; font-size: 11px; font-weight: 700; padding: 2px 8px;
-            border-radius: 4px; margin-right: 8px; vertical-align: middle;
-        }
-        .m-GET { background: rgba(34,197,94,.18); color: #4ade80; }
-        .m-POST { background: rgba(245,158,11,.18); color: #fbbf24; }
         .checks { display: flex; flex-wrap: wrap; gap: 8px 16px; }
-        .checks label {
-            display: flex; align-items: center; gap: 6px; margin: 0;
-            color: var(--text); font-size: 13px; cursor: pointer;
-        }
+        .checks label { display: flex; align-items: center; gap: 6px; margin: 0; color: var(--text); font-size: 13px; cursor: pointer; }
         .checks input { width: auto; }
         .free-row { display: flex; gap: 8px; margin-bottom: 8px; align-items: center; }
         .free-row input { flex: 1; }
-        .toolbar { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 4px; }
-        .curl-box {
-            position: relative;
-            background: #0b1220; border: 1px solid #475569; border-radius: 6px;
-            padding: 12px 14px; font-family: "Cascadia Code", Consolas, monospace;
-            font-size: 13px; color: #7dd3fc; white-space: pre-wrap; word-break: break-all;
-            margin-bottom: 10px; max-height: 180px; overflow: auto;
-        }
-        .meta { display: grid; grid-template-columns: repeat(auto-fit, minmax(120px, 1fr)); gap: 10px; margin-bottom: 14px; }
-        .meta .cell { background: var(--panel-2); border-radius: 8px; padding: 9px 12px; }
-        .meta .k { font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: .03em; }
-        .meta .v { font-size: 15px; font-weight: 600; margin-top: 3px; word-break: break-word; }
-        #resp-body { flex: 1 1 auto; min-height: 120px; font-family: "Cascadia Code", Consolas, monospace; font-size: 13px; }
+        .field-row { display: flex; gap: 12px; }
+        .field-row .field { flex: 1; min-width: 0; }
+        .meta { grid-template-columns: repeat(auto-fit, minmax(120px, 1fr)); margin-bottom: 14px; }
+        .meta .v { font-size: 15px; }
+        #resp-body { flex: 1 1 auto; min-height: 120px; font-family: var(--mono); font-size: 13px; }
         .status-ok { color: var(--ok); }
         .status-err { color: var(--err); }
-        .hint { font-size: 12px; color: var(--muted); margin-top: 6px; }
         .render-frame {
-            width: 100%; flex: 1 1 auto; min-height: 120px; border: 1px solid #475569; border-radius: 6px;
+            width: 100%; flex: 1 1 auto; min-height: 120px; border: 1px solid var(--border); border-radius: var(--radius-sm);
             background: #fff; display: none;
         }
         /* Overlay « traitement en cours » superposé à la section Réponse. */
         .resp-panel { position: relative; }
         .overlay {
-            position: absolute; inset: 0; border-radius: 10px; z-index: 5;
-            background: rgba(15,23,42,.78); backdrop-filter: blur(2px);
+            position: absolute; inset: 0; border-radius: var(--radius); z-index: 5;
+            background: color-mix(in srgb, var(--panel) 80%, transparent); backdrop-filter: blur(2px);
             display: none; flex-direction: column; align-items: center;
             justify-content: center; gap: 14px;
             color: var(--text); font-size: 14px; font-weight: 600;
         }
         .overlay.show { display: flex; }
-        .spinner {
-            width: 44px; height: 44px; border-radius: 50%;
-            border: 4px solid rgba(148,163,184,.25); border-top-color: var(--accent);
-            animation: spin .8s linear infinite;
-        }
-        @keyframes spin { to { transform: rotate(360deg); } }
     </style>
 </head>
 <body>
-    <header>
-        <h1>🧪 Testeur d'API — Mirth Checker</h1>
+    <header class="topbar">
+        <div class="brand">
+            <span class="logo">🧪</span>
+            <h1>Testeur d'API</h1>
+        </div>
         <nav>
             <a href="statistiques.html">📊 Statistiques</a>
             <a href="database.html">🗄️ Base de données</a>
+            <a href="api.html" aria-current="page">🧪 Testeur d'API</a>
         </nav>
+        <div class="actions">
+            <button class="theme-toggle" type="button" title="Basculer clair / sombre" aria-label="Basculer le thème">
+                <span class="icon-moon">🌙</span><span class="icon-sun">☀️</span>
+            </button>
+        </div>
     </header>
 
     <div class="grid">

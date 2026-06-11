@@ -4,129 +4,44 @@
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>Mirth Checker — Base de données</title>
+    <!-- Thème (anti-flash : pose data-theme avant le rendu) -->
+    <script>
+        (function(){try{var t=localStorage.getItem("mc-theme");if(!t)t=matchMedia("(prefers-color-scheme: light)").matches?"light":"dark";document.documentElement.setAttribute("data-theme",t);}catch(e){document.documentElement.setAttribute("data-theme","dark");}})();
+    </script>
+    <link rel="stylesheet" href="theme.css">
+    <script src="theme.js" defer></script>
     <style>
-        :root {
-            --bg: #0f172a;
-            --panel: #1e293b;
-            --panel-2: #334155;
-            --border: #293548;
-            --text: #e2e8f0;
-            --muted: #94a3b8;
-            --accent: #38bdf8;
-            --accent-2: #a78bfa;
-            --ok: #22c55e;
-            --err: #ef4444;
-            --warn: #f59e0b;
-        }
-        * { box-sizing: border-box; }
-        body {
-            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Arial, sans-serif;
-            background: var(--bg);
-            color: var(--text);
-            margin: 0;
-            padding: 24px;
-        }
-        header {
-            display: flex; flex-wrap: wrap; align-items: center;
-            justify-content: space-between; gap: 12px; margin-bottom: 18px;
-        }
-        h1 { font-size: 22px; margin: 0; font-weight: 600; }
-        nav a { color: var(--accent); font-size: 14px; text-decoration: none; margin-left: 16px; }
-        nav a:hover { text-decoration: underline; }
+        /* --- Styles spécifiques à la page Base de données --- */
         .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 18px; align-items: start; }
         @media (max-width: 900px) { .grid { grid-template-columns: 1fr; } }
-        .panel {
-            background: var(--panel);
-            border: 1px solid var(--border);
-            border-radius: 10px;
-            padding: 18px;
-            margin-bottom: 18px;
-        }
-        .panel h2 {
-            font-size: 15px; margin: 0 0 14px; font-weight: 600;
-            text-transform: uppercase; letter-spacing: .04em; color: var(--muted);
-            display: flex; align-items: center; gap: 8px;
-        }
-        .meta { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 10px; }
-        .meta .cell { background: var(--panel-2); border-radius: 8px; padding: 11px 13px; }
-        .meta .k { font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: .03em; }
-        .meta .v { font-size: 18px; font-weight: 600; margin-top: 4px; word-break: break-word; }
-        .meta .v small { font-size: 12px; color: var(--muted); font-weight: 400; }
-        table { width: 100%; border-collapse: collapse; margin-top: 6px; font-size: 13px; }
-        th, td { text-align: left; padding: 7px 10px; border-bottom: 1px solid var(--border); }
-        th { color: var(--muted); font-weight: 600; text-transform: uppercase; font-size: 11px; letter-spacing: .03em; }
-        td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
-        .path {
-            font-family: "Cascadia Code", Consolas, monospace; font-size: 12px;
-            color: #7dd3fc; word-break: break-all; background: #0b1220;
-            border: 1px solid var(--border); border-radius: 6px; padding: 8px 10px; margin-top: 4px;
-        }
-        label { font-size: 13px; color: var(--muted); display: block; margin-bottom: 5px; }
-        input[type=number], input[type=file] {
-            background: var(--panel-2); color: var(--text);
-            border: 1px solid #475569; border-radius: 6px;
-            padding: 8px 11px; font-size: 14px; width: 100%; font-family: inherit;
-        }
-        input[type=file] { padding: 6px 8px; cursor: pointer; }
-        .field { margin-bottom: 14px; }
-        .row { display: flex; gap: 10px; align-items: flex-end; flex-wrap: wrap; }
-        .row .field { flex: 1; margin-bottom: 0; min-width: 120px; }
-        button {
-            background: var(--panel-2); color: var(--text);
-            border: 1px solid #475569; border-radius: 6px;
-            padding: 8px 14px; font-size: 14px; cursor: pointer; white-space: nowrap;
-        }
-        button:hover:not(:disabled) { background: #475569; }
-        button:disabled { opacity: .5; cursor: not-allowed; }
-        button.primary { background: var(--accent); color: #06243a; border-color: var(--accent); font-weight: 600; }
-        button.primary:hover:not(:disabled) { background: #7dd3fc; }
-        button.danger { background: rgba(239,68,68,.15); color: #fca5a5; border-color: #7f1d1d; font-weight: 600; }
-        button.danger:hover:not(:disabled) { background: rgba(239,68,68,.28); }
-        button.warn { background: rgba(245,158,11,.15); color: #fbbf24; border-color: #78350f; }
-        button.warn:hover:not(:disabled) { background: rgba(245,158,11,.28); }
-        .op-block { padding: 13px 0; border-bottom: 1px solid var(--border); }
+        button { white-space: nowrap; }
+        .op-block { padding: 13px 0; border-bottom: 1px solid var(--border-soft); }
         .op-block:last-child { border-bottom: none; padding-bottom: 0; }
         .op-block:first-of-type { padding-top: 0; }
-        .op-title { font-size: 14px; font-weight: 600; margin-bottom: 4px; }
+        .op-title { font-size: 14px; font-weight: 650; margin-bottom: 4px; }
         .op-desc { font-size: 12px; color: var(--muted); margin-bottom: 10px; line-height: 1.5; }
-        .toolbar { display: flex; gap: 8px; flex-wrap: wrap; }
-        .badge {
-            display: inline-block; font-size: 11px; font-weight: 700; padding: 2px 9px;
-            border-radius: 20px; vertical-align: middle;
-        }
-        .b-ok { background: rgba(34,197,94,.18); color: #4ade80; }
-        .b-err { background: rgba(239,68,68,.18); color: #f87171; }
-        .b-warn { background: rgba(245,158,11,.18); color: #fbbf24; }
-        .b-muted { background: var(--panel-2); color: var(--muted); }
-        .console {
-            background: #0b1220; border: 1px solid var(--border); border-radius: 8px;
-            padding: 12px 14px; font-family: "Cascadia Code", Consolas, monospace;
-            font-size: 12.5px; line-height: 1.6; max-height: 260px; overflow: auto;
-            white-space: pre-wrap; word-break: break-word;
-        }
-        .log-line { margin: 0; }
-        .log-time { color: var(--muted); }
-        .log-ok { color: #4ade80; }
-        .log-err { color: #f87171; }
-        .log-info { color: #7dd3fc; }
         .gauge-wrap { margin-top: 10px; }
-        .gauge-track { background: var(--panel-2); border-radius: 6px; height: 10px; overflow: hidden; }
+        .gauge-track { background: var(--panel-2); border: 1px solid var(--border-soft); border-radius: 6px; height: 10px; overflow: hidden; }
         .gauge-fill { height: 100%; background: var(--warn); transition: width .4s; }
-        .hint { font-size: 12px; color: var(--muted); margin-top: 8px; }
-        footer { font-size: 12px; color: var(--muted); text-align: center; margin-top: 8px; }
-        .dot { display: inline-block; width: 9px; height: 9px; border-radius: 50%; margin-right: 5px; }
-        .pulse { animation: pulse 2s infinite; }
-        @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:.4} }
     </style>
 </head>
 <body>
-    <header>
-        <h1>🗄️ Base de données — Mirth Checker</h1>
+    <header class="topbar">
+        <div class="brand">
+            <span class="logo">🗄️</span>
+            <h1>Base de données</h1>
+        </div>
         <nav>
             <a href="statistiques.html">📊 Statistiques</a>
+            <a href="database.html" aria-current="page">🗄️ Base de données</a>
             <a href="api.html">🧪 Testeur d'API</a>
-            <button id="refresh" class="primary" style="margin-left:16px;">↻ Rafraîchir</button>
         </nav>
+        <div class="actions">
+            <button id="refresh" class="primary">↻ Rafraîchir</button>
+            <button class="theme-toggle" type="button" title="Basculer clair / sombre" aria-label="Basculer le thème">
+                <span class="icon-moon">🌙</span><span class="icon-sun">☀️</span>
+            </button>
+        </div>
     </header>
 
     <!-- ============== ÉTAT DE LA BASE (pleine largeur) ============== -->

@@ -4,6 +4,11 @@
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>Mirth Checker — Redirection</title>
+    <!-- Thème (anti-flash : pose data-theme avant le rendu) -->
+    <script>
+        (function(){try{var t=localStorage.getItem("mc-theme");if(!t)t=matchMedia("(prefers-color-scheme: light)").matches?"light":"dark";document.documentElement.setAttribute("data-theme",t);}catch(e){document.documentElement.setAttribute("data-theme","dark");}})();
+    </script>
+    <link rel="stylesheet" href="theme.css">
     <!-- Redirection automatique vers la page de statistiques -->
     <meta http-equiv="refresh" content="0; url=statistiques.html">
     <link rel="canonical" href="statistiques.html">
@@ -12,17 +17,7 @@
         window.location.replace("statistiques.html");
     </script>
     <style>
-        body {
-            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Arial, sans-serif;
-            background: #0f172a;
-            color: #e2e8f0;
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            height: 100vh;
-            margin: 0;
-        }
-        a { color: #38bdf8; }
+        body { display: flex; align-items: center; justify-content: center; height: 100vh; padding: 0; }
     </style>
 </head>
 <body>

@@ -8,159 +8,53 @@
     <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/luxon@3.4.4/build/global/luxon.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/chartjs-adapter-luxon@1.3.1/dist/chartjs-adapter-luxon.umd.min.js"></script>
+    <!-- Thème (anti-flash : pose data-theme avant le rendu) -->
+    <script>
+        (function(){try{var t=localStorage.getItem("mc-theme");if(!t)t=matchMedia("(prefers-color-scheme: light)").matches?"light":"dark";document.documentElement.setAttribute("data-theme",t);}catch(e){document.documentElement.setAttribute("data-theme","dark");}})();
+    </script>
+    <link rel="stylesheet" href="theme.css">
+    <script src="theme.js" defer></script>
     <style>
-        :root {
-            --bg: #0f172a;
-            --panel: #1e293b;
-            --panel-2: #334155;
-            --text: #e2e8f0;
-            --muted: #94a3b8;
-            --cpu: #38bdf8;
-            --mem: #a78bfa;
-            --disk: #f59e0b;
-            --sock: #2dd4bf;
-            --ok: #22c55e;
-            --err: #ef4444;
-        }
-        * { box-sizing: border-box; }
-        body {
-            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Arial, sans-serif;
-            background: var(--bg);
-            color: var(--text);
-            margin: 0;
-            padding: 24px;
-        }
-        header {
-            display: flex;
-            flex-wrap: wrap;
-            align-items: center;
-            justify-content: space-between;
-            gap: 12px;
-            margin-bottom: 20px;
-        }
-        h1 { font-size: 22px; margin: 0; font-weight: 600; }
-        .controls { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
-        select, button {
-            background: var(--panel-2);
-            color: var(--text);
-            border: 1px solid #475569;
-            border-radius: 6px;
-            padding: 7px 12px;
-            font-size: 14px;
-            cursor: pointer;
-        }
-        button:hover { background: #475569; }
-        .status { font-size: 13px; color: var(--muted); }
-        .cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 14px; margin-bottom: 22px; }
-        .card {
-            background: var(--panel);
-            border: 1px solid #293548;
-            border-radius: 10px;
-            padding: 16px 18px;
-        }
-        .card .label { font-size: 12px; color: var(--muted); text-transform: uppercase; letter-spacing: .04em; }
-        .card .value { font-size: 28px; font-weight: 600; margin-top: 6px; }
-        .card .sub { font-size: 12px; color: var(--muted); margin-top: 4px; }
-        .chart-panel {
-            background: var(--panel);
-            border: 1px solid #293548;
-            border-radius: 10px;
-            padding: 18px;
-            margin-bottom: 22px;
-        }
+        /* --- Styles spécifiques à la page Statistiques --- */
         .chart-wrap { position: relative; height: 380px; }
-        footer { font-size: 12px; color: var(--muted); text-align: center; margin-top: 8px; }
-        .dot { display: inline-block; width: 9px; height: 9px; border-radius: 50%; margin-right: 5px; }
-        .pulse { animation: pulse 2s infinite; }
-        @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:.4} }
-        .sysinfo {
-            display: flex; flex-wrap: wrap; gap: 10px 22px;
-            background: var(--panel); border: 1px solid #293548; border-radius: 10px;
-            padding: 12px 18px; margin-bottom: 18px; font-size: 14px; color: var(--muted);
-        }
-        .sysinfo b { color: var(--text); font-weight: 600; }
-        .legend-events { display: flex; gap: 18px; margin-bottom: 10px; font-size: 12px; color: var(--muted); }
+        .legend-events { display: flex; gap: 18px; flex-wrap: wrap; margin-bottom: 10px; font-size: 12px; color: var(--muted); }
         .legend-events span { display: inline-flex; align-items: center; gap: 6px; }
         .vbar { display: inline-block; width: 3px; height: 13px; border-radius: 1px; }
-        .section-title {
-            font-size: 17px; font-weight: 600; margin: 34px 0 14px;
-            padding-bottom: 8px; border-bottom: 1px solid #293548;
-            display: flex; align-items: center; gap: 9px;
-        }
-        .panel-title { font-size: 14px; font-weight: 600; margin: 0 0 12px; color: var(--text); }
-        table.mtable { width: 100%; border-collapse: collapse; font-size: 13px; }
-        table.mtable th, table.mtable td {
-            text-align: left; padding: 7px 10px; border-bottom: 1px solid #293548;
-        }
-        table.mtable th { color: var(--muted); font-weight: 600; text-transform: uppercase; letter-spacing: .03em; font-size: 11px; }
-        table.mtable td.num { text-align: right; font-variant-numeric: tabular-nums; }
-        table.mtable tr.totals-row td { border-top: 2px solid #3a4761; border-bottom: none; background: rgba(148,163,184,.06); }
-        .badge {
-            display: inline-block; padding: 2px 8px; border-radius: 10px;
-            font-size: 11px; font-weight: 600;
-        }
-        .badge.on { background: rgba(34,197,94,.16); color: #4ade80; }
-        .badge.off { background: rgba(239,68,68,.16); color: #f87171; }
-        .badge.warn { background: rgba(245,158,11,.16); color: #fbbf24; }
-        .badge.idle { background: rgba(148,163,184,.16); color: #cbd5e1; }
-        .muted-note { font-size: 12px; color: var(--muted); margin-top: 8px; }
-        .nav-link { color: var(--cpu); font-size: 14px; text-decoration: none; }
-        .nav-link:hover { text-decoration: underline; }
         .range-summary { font-size: 13px; color: var(--muted); }
         .range-summary b { color: var(--text); font-weight: 600; }
 
-        /* ---------- Modale Période & intervalle ---------- */
-        .modal-overlay {
-            position: fixed; inset: 0; background: rgba(2,6,23,.66);
-            display: none; align-items: center; justify-content: center; z-index: 50;
-            backdrop-filter: blur(2px);
-        }
-        .modal-overlay.open { display: flex; }
-        .modal {
-            background: var(--panel); border: 1px solid #293548; border-radius: 12px;
-            width: min(460px, calc(100vw - 32px)); max-height: calc(100vh - 48px);
-            overflow: auto; box-shadow: 0 24px 60px rgba(0,0,0,.45);
-        }
-        .modal-head {
-            display: flex; align-items: center; justify-content: space-between;
-            padding: 16px 20px; border-bottom: 1px solid #293548;
-        }
-        .modal-head h2 { font-size: 16px; margin: 0; font-weight: 600; }
-        .modal-close {
-            background: none; border: none; color: var(--muted); font-size: 20px;
-            cursor: pointer; line-height: 1; padding: 2px 6px;
-        }
-        .modal-close:hover { color: var(--text); background: none; }
-        .modal-body { padding: 18px 20px; }
+        /* Compléments propres à la modale Période & intervalle */
         .modal-section { margin-bottom: 20px; }
         .modal-section:last-child { margin-bottom: 0; }
         .modal-section > .sec-label {
             font-size: 12px; text-transform: uppercase; letter-spacing: .05em;
-            color: var(--muted); font-weight: 600; margin-bottom: 9px;
+            color: var(--muted); font-weight: 650; margin-bottom: 9px;
         }
         .modal .field-label { font-size: 12px; color: var(--muted); display: block; margin-bottom: 4px; }
-        .modal select, .modal input[type=datetime-local] {
-            background: var(--panel-2); color: var(--text); border: 1px solid #475569;
-            border-radius: 6px; padding: 8px 11px; font-size: 14px; width: 100%; font-family: inherit;
-        }
         .modal .date-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
         .modal .modal-actions { display: flex; gap: 8px; margin-top: 12px; flex-wrap: wrap; }
-        .modal button.primary { background: var(--cpu); color: #06243a; border-color: var(--cpu); font-weight: 600; }
-        .modal button.primary:hover { background: #7dd3fc; }
         .switch-row { display: flex; align-items: center; gap: 9px; font-size: 14px; color: var(--text); }
         .switch-row input { width: 16px; height: 16px; cursor: pointer; }
-        .modal .hint { font-size: 12px; color: var(--muted); margin-top: 8px; line-height: 1.5; }
     </style>
 </head>
 <body>
-    <header>
-        <h1>📊 Statistiques système — Mirth Checker</h1>
+    <header class="topbar">
+        <div class="brand">
+            <span class="logo">📊</span>
+            <h1>Statistiques système</h1>
+        </div>
+        <nav>
+            <a href="statistiques.html" aria-current="page">📊 Statistiques</a>
+            <a href="database.html">🗄️ Base de données</a>
+            <a href="api.html">🧪 Testeur d'API</a>
+        </nav>
         <div class="controls">
             <span class="range-summary" id="range-summary">—</span>
             <button id="openRange" title="Configurer la période, l'intervalle et le rafraîchissement">⚙ Période…</button>
             <button id="refresh">↻ Rafraîchir</button>
-            <a href="database.html" class="nav-link">🗄️ Base de données</a>
-            <a href="api.html" class="nav-link">🧪 Testeur d'API</a>
+            <button class="theme-toggle" type="button" title="Basculer clair / sombre" aria-label="Basculer le thème">
+                <span class="icon-moon">🌙</span><span class="icon-sun">☀️</span>
+            </button>
         </div>
     </header>
 
@@ -471,6 +365,7 @@ function buildChart(samples) {
     // Barres verticales : le second jeu de données (évènements/alertes), commun
     // à tous les graphes. La courbe se brise toujours sur les relevés nuls (coupures).
     const markers = eventMarkers();
+    const tc = window.MCTheme ? MCTheme.chartColors() : { tick: "#94a3b8", grid: "rgba(148,163,184,.08)", text: "#e2e8f0" };
 
     const cfg = {
         type: "line",
@@ -484,17 +379,17 @@ function buildChart(samples) {
                 x: {
                     type: "time",
                     time: { tooltipFormat: "dd/MM HH:mm:ss", displayFormats: { minute: "HH:mm", hour: "dd/MM HH:mm", day: "dd/MM" } },
-                    ticks: { color: "#94a3b8", maxRotation: 0, autoSkipPadding: 20 },
-                    grid: { color: "rgba(148,163,184,.08)" }
+                    ticks: { color: tc.tick, maxRotation: 0, autoSkipPadding: 20 },
+                    grid: { color: tc.grid }
                 },
                 y: {
                     min: 0, max: 100,
-                    ticks: { color: "#94a3b8", callback: v => v + " %" },
-                    grid: { color: "rgba(148,163,184,.08)" }
+                    ticks: { color: tc.tick, callback: v => v + " %" },
+                    grid: { color: tc.grid }
                 }
             },
             plugins: {
-                legend: { labels: { color: "#e2e8f0", usePointStyle: true, boxWidth: 8 } },
+                legend: { labels: { color: tc.text, usePointStyle: true, boxWidth: 8 } },
                 tooltip: { callbacks: { label: c => `${c.dataset.label}: ${c.parsed.y === null ? "—" : c.parsed.y.toFixed(1)} %` } }
             }
         }
@@ -509,6 +404,11 @@ function buildChart(samples) {
             if (chart.data.datasets[i]) chart.data.datasets[i].data = ds.data;
             else chart.data.datasets[i] = ds;
         });
+        chart.options.scales.x.ticks.color = tc.tick;
+        chart.options.scales.x.grid.color = tc.grid;
+        chart.options.scales.y.ticks.color = tc.tick;
+        chart.options.scales.y.grid.color = tc.grid;
+        chart.options.plugins.legend.labels.color = tc.text;
         chart.$eventMarkers = markers;
         chart.update("none");
     } else {
@@ -673,6 +573,7 @@ function buildMirthChart(samples) {
         { label: "Sockets",   data: sock, borderColor: "#2dd4bf", backgroundColor: "rgba(45,212,191,.10)",  tension: .25, fill: false, pointRadius: 0, borderWidth: 2, spanGaps: true, yAxisID: "ySock" },
     ];
 
+    const tc = window.MCTheme ? MCTheme.chartColors() : { tick: "#94a3b8", grid: "rgba(148,163,184,.08)", text: "#e2e8f0" };
     const cfg = {
         type: "line",
         data: { labels, datasets },
@@ -685,13 +586,13 @@ function buildMirthChart(samples) {
                 x: {
                     type: "time",
                     time: { tooltipFormat: "dd/MM HH:mm:ss", displayFormats: { minute: "HH:mm", hour: "dd/MM HH:mm", day: "dd/MM" } },
-                    ticks: { color: "#94a3b8", maxRotation: 0, autoSkipPadding: 20 },
-                    grid: { color: "rgba(148,163,184,.08)" }
+                    ticks: { color: tc.tick, maxRotation: 0, autoSkipPadding: 20 },
+                    grid: { color: tc.grid }
                 },
                 y: {
                     min: 0, max: 100, position: "left",
-                    ticks: { color: "#94a3b8", callback: v => v + " %" },
-                    grid: { color: "rgba(148,163,184,.08)" }
+                    ticks: { color: tc.tick, callback: v => v + " %" },
+                    grid: { color: tc.grid }
                 },
                 ySock: {
                     min: 0, position: "right",
@@ -701,7 +602,7 @@ function buildMirthChart(samples) {
                 }
             },
             plugins: {
-                legend: { labels: { color: "#e2e8f0", usePointStyle: true, boxWidth: 8 } },
+                legend: { labels: { color: tc.text, usePointStyle: true, boxWidth: 8 } },
                 tooltip: { callbacks: { label: c => {
                     if (c.parsed.y === null) return `${c.dataset.label}: —`;
                     return c.dataset.label === "Sockets"
@@ -721,6 +622,11 @@ function buildMirthChart(samples) {
             if (mirthChart.data.datasets[i]) mirthChart.data.datasets[i].data = ds.data;
             else mirthChart.data.datasets[i] = ds;
         });
+        mirthChart.options.scales.x.ticks.color = tc.tick;
+        mirthChart.options.scales.x.grid.color = tc.grid;
+        mirthChart.options.scales.y.ticks.color = tc.tick;
+        mirthChart.options.scales.y.grid.color = tc.grid;
+        mirthChart.options.plugins.legend.labels.color = tc.text;
         mirthChart.$eventMarkers = markers;
         mirthChart.update("none");
     } else {
@@ -943,6 +849,9 @@ document.getElementById("range").addEventListener("change", () => { updateRangeS
 document.getElementById("autorefresh").addEventListener("change", () => { setupAuto(); updateRangeSummary(); });
 document.getElementById("applyInterval").addEventListener("click", enterIntervalMode);
 document.getElementById("clearInterval").addEventListener("click", exitIntervalMode);
+
+// Re-rendu des graphiques quand le thème bascule (couleurs d'axes / légende).
+document.addEventListener("mc-theme-change", () => { if (chart) render(); if (mirthChart) renderMirth(); });
 
 setInterval(tickClock, 1000);   // horloge système qui défile entre deux refresh
 updateRangeSummary();
