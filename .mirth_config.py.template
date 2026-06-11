@@ -18,5 +18,5 @@ MIRTH_PASSWORD = "admin"
 MIRTH_VERIFY_SSL = False
 
 # Nom du processus système hébergeant Mirth, surveillé pour l'historisation
-# CPU / mémoire / sockets (ex. "mirth.exe", "mcservice.exe", "java.exe").
-MIRTH_PROCESS = "mirth.exe"
+# CPU / mémoire / sockets (ex. "mcservice.exe", "mirth.exe", "java.exe").
+MIRTH_PROCESS = "mcservice.exe"

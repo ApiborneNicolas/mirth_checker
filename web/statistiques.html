@@ -651,7 +651,7 @@ async function loadIncremental() {
 }
 
 // =====================================================================
-// SUPERVISION MIRTH (2e section) : processus mirth.exe + API REST Mirth
+// SUPERVISION MIRTH (2e section) : processus mcservice.exe + API REST Mirth
 // =====================================================================
 
 // Construit/maj le graphe du processus Mirth : CPU % et Mémoire % sur l'axe
@@ -747,7 +747,7 @@ function setMirthCards(d) {
         subEl.textContent = (d.process || "mirth") + " — PID " + (d.pids || []).join(", ");
     } else {
         stateEl.innerHTML = '<span class="badge off">● Arrêté</span>';
-        subEl.textContent = (d && d.process ? d.process : "mirth.exe") + " introuvable";
+        subEl.textContent = (d && d.process ? d.process : "mcservice.exe") + " introuvable";
     }
 }
 

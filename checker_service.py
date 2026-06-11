@@ -80,7 +80,7 @@ def _round_floats(obj):
 # ==========================================================================
 # TÂCHES PROGRAMMÉES : relevés périodiques (tagués par source)
 #   - tag 'system' : CPU / mémoire / stockage de la machine
-#   - tag 'mirth'  : CPU / mémoire / sockets du processus Mirth (mirth.exe)
+#   - tag 'mirth'  : CPU / mémoire / sockets du processus Mirth (mcservice.exe)
 # Chaque relevé est étiqueté (`tag`) pour cohabiter dans la même table et pouvoir
 # évoluer (ajout de nouvelles sources sans changement de schéma).
 # ==========================================================================
@@ -873,7 +873,7 @@ def api_mirth(req):
 
 
 # ==========================================================================
-# API : SUPERVISION MIRTH (API REST Mirth + processus mirth.exe)
+# API : SUPERVISION MIRTH (API REST Mirth + processus mcservice.exe)
 # ==========================================================================
 def api_mirth_api(req):
     """Vue d'ensemble du serveur Mirth via son API REST.

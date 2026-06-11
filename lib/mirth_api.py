@@ -34,7 +34,7 @@ _DEFAULTS = {
     "MIRTH_USER": "admin",
     "MIRTH_PASSWORD": "admin",
     "MIRTH_VERIFY_SSL": False,
-    "MIRTH_PROCESS": "mirth.exe",   # nom du processus à surveiller (system_state)
+    "MIRTH_PROCESS": "mcservice.exe",   # nom du processus à surveiller (system_state)
 }
 
 # Dossier de base (compatible PyInstaller, comme quickmail.py).
@@ -81,7 +81,7 @@ def get_config():
 
 
 def get_process_name():
-    """Nom du processus Mirth à surveiller côté système (ex. 'mirth.exe')."""
+    """Nom du processus Mirth à surveiller côté système (ex. 'mcservice.exe')."""
     return get_config()["MIRTH_PROCESS"]
 
 

@@ -256,7 +256,7 @@ const ENDPOINTS = [
       desc: "Vue d'ensemble du serveur Mirth via son API REST (version, stats JVM, statuts des canaux). reachable=false si le serveur est injoignable.",
       params: [ { name: "timeout", kind: "number", label: "Timeout (s)", default: "8" } ] },
     { id: "/api/mirth/process", method: "GET", cat: "Mirth", label: "Mirth — Processus",
-      desc: "Instantané live du processus Mirth (mirth.exe) : CPU, mémoire et nombre de sockets.", params: [] },
+      desc: "Instantané live du processus Mirth (mcservice.exe) : CPU, mémoire et nombre de sockets.", params: [] },
     { id: "/api/status", method: "GET", cat: "Service", label: "Statut du service", desc: "État du service et du planificateur.", params: [] },
     { id: "/api/mail", method: "POST", cat: "Mail", label: "Envoyer un email",
       desc: "Envoie un email via quickmail. Les champs sont transmis dans le corps JSON.",

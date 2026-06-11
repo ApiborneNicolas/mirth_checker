@@ -78,7 +78,7 @@ def init_db(db_path=DEFAULT_DB_PATH):
             conn.execute("ALTER TABLE metrics ADD COLUMN tag TEXT DEFAULT 'system'")
             conn.execute("UPDATE metrics SET tag = 'system' WHERE tag IS NULL")
         # `sockets` : nombre de sockets (ports en écoute + connexions) — utilisé
-        # pour le suivi temporel d'un processus (ex. mirth.exe).
+        # pour le suivi temporel d'un processus (ex. mcservice.exe).
         if "sockets" not in cols:
             conn.execute("ALTER TABLE metrics ADD COLUMN sockets INTEGER")
         # Index composite : l'historique est presque toujours filtré par `tag`
