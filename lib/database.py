@@ -748,6 +748,32 @@ def get_mirth_overview_latest(db_path=DEFAULT_DB_PATH):
     }
 
 
+def get_mirth_server_latest(db_path=DEFAULT_DB_PATH):
+    """Dernière ligne `mirth_server` historisée, QUEL QUE SOIT son état.
+
+    Contrairement à `get_mirth_overview_latest` (qui ne retient que le dernier
+    instantané JOIGNABLE pour reconstruire les canaux), cette fonction renvoie la
+    toute dernière relève du collecteur de fond afin de refléter la joignabilité
+    « courante » (reachable/version/error) sans aucun appel réseau. Renvoie None
+    si aucune relève n'existe encore.
+    """
+    conn = _connect(db_path)
+    try:
+        row = conn.execute(
+            "SELECT * FROM mirth_server ORDER BY id DESC LIMIT 1"
+        ).fetchone()
+    finally:
+        conn.close()
+    if not row:
+        return None
+    return {
+        "timestamp": row["timestamp"],
+        "reachable": bool(row["reachable"]),
+        "version": row["version"],
+        "error": row["error_text"],
+    }
+
+
 def get_mirth_series(hours=24, date_deb=None, date_fin=None, channel_id=None,
                      meta_data_id=None, limit=20000, db_path=DEFAULT_DB_PATH):
     """Série temporelle de compteurs Mirth, du plus ancien au plus récent.

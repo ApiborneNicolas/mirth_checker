@@ -1179,13 +1179,16 @@ def _mirth_timeout(req):
 
 
 def api_mirth_api(req):
-    """Vue d'ensemble du serveur Mirth, servie depuis l'HISTORIQUE.
+    """Vue d'ensemble du serveur Mirth, servie INTÉGRALEMENT depuis l'HISTORIQUE.
 
     Les canaux/connecteurs/totaux/version proviennent du dernier instantané
-    historisé par le collecteur `mirth-overview-collector` (aucun appel API lourd
-    à chaque consultation — évite la surcharge sur rafraîchissements répétés).
-    Seuls la JOIGNABILITÉ temps-réel et la version sont rafraîchies par un petit
-    appel live (`get_status`). Le champ `snapshot_at` indique l'âge des données.
+    historisé par le collecteur `mirth-overview-collector` ; la JOIGNABILITÉ et la
+    version « courantes » proviennent de la toute dernière relève de ce même
+    collecteur (`get_mirth_server_latest`). AUCUN appel réseau à Mirth n'est fait
+    ici : la page se charge donc à la vitesse de SQLite. L'état affiché reflète le
+    dernier tick du collecteur (au plus l'intervalle de collecte de retard), ce qui
+    est suffisant pour de la supervision. Le champ `snapshot_at` indique l'âge des
+    données canaux ; `reachable_at` celui de l'état de joignabilité.
 
     En l'absence d'instantané (service tout juste démarré), bascule sur un appel
     `get_overview()` live pour ne pas afficher une page vide.
@@ -1199,13 +1202,19 @@ def api_mirth_api(req):
         ov["snapshot_at"] = None
         return ov
 
-    status = mirth_api.get_status(timeout=_mirth_timeout(req))
     data["base_url"] = base_url
-    # La joignabilité « maintenant » et la version priment sur l'instantané.
-    data["reachable"] = bool(status.get("reachable"))
-    if status.get("version"):
-        data["version"] = status["version"]
-    data["error"] = status.get("error")
+    # Joignabilité/version « courantes » = dernière relève du collecteur (toute,
+    # pas seulement joignable), lue en base — pas de login Mirth synchrone.
+    latest = database.get_mirth_server_latest()
+    if latest:
+        data["reachable"] = latest["reachable"]
+        if latest.get("version"):
+            data["version"] = latest["version"]
+        data["error"] = latest.get("error")
+        data["reachable_at"] = latest["timestamp"]
+    else:
+        data["reachable"] = True
+        data["reachable_at"] = data.get("snapshot_at")
     return data
 
 
