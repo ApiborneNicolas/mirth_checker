@@ -767,6 +767,25 @@ def get_server_info(timeout=8):
     return result
 
 
+def get_status(timeout=8):
+    """Statut minimal du serveur Mirth : joignabilité (login) + version.
+
+    Appel volontairement léger destiné à l'affichage temps-réel de l'état et de
+    la version lorsque le reste des données est servi depuis l'historique (cf.
+    checker_service.api_mirth_api). Le login suffit à prouver la joignabilité ;
+    on ne récupère ensuite que la version. Ne lève jamais : en cas d'échec,
+    renvoie {"reachable": False, "error": ...}.
+    """
+    result = _new_result({"version": None})
+    data, error = _with_client(lambda c: c.get_version(), timeout=timeout)
+    if data is None:
+        result["error"] = error
+        return result
+    result["version"] = data
+    result["reachable"] = True
+    return result
+
+
 def get_errors(timeout=8):
     """Canaux présentant des erreurs (statistique ERROR > 0) ou un état d'erreur."""
     result = _new_result({"channels": [], "error_count": 0, "total_errors": 0})

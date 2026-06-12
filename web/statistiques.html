@@ -155,9 +155,10 @@
                     <div class="sec-label">Période glissante</div>
                     <label class="field-label" for="range">Dernières…</label>
                     <select id="range">
+                        <option value="today">Aujourd'hui (depuis 00h00)</option>
                         <option value="1">1 heure</option>
-                        <option value="6">6 heures</option>
-                        <option value="24" selected>24 heures</option>
+                        <option value="6" selected>6 heures</option>
+                        <option value="24">24 heures</option>
                         <option value="72">3 jours</option>
                         <option value="168">7 jours</option>
                         <option value="0">Tout l'historique</option>
@@ -217,6 +218,7 @@
         <span title="Version du serveur Mirth">🏷 Version : <b id="ma-version">—</b></span>
         <span title="Canaux déployés (démarrés / total)">📡 Canaux : <b id="ma-channels">—</b></span>
         <span title="URL de l'API Mirth interrogée">🧩 <b id="ma-url">—</b></span>
+        <span title="Horodatage du dernier instantané historisé (les canaux affichés en proviennent)">🕓 Instantané : <b id="ma-snapshot">—</b></span>
     </div>
 
     <!-- ===================== ONGLETS ===================== -->
@@ -252,8 +254,13 @@
     </div>
 
     <div class="chart-panel" id="throughput-panel">
-        <div class="legend-events">
+        <div class="legend-events" style="display:flex;align-items:center;gap:12px;flex-wrap:wrap;justify-content:space-between">
             <span>📈 Activité Mirth — débit déduit des compteurs cumulatifs (messages/min entre deux relevés). Une remise à zéro des compteurs (redémarrage Mirth) est ignorée (débit plancher 0).</span>
+            <label style="display:flex;align-items:center;gap:6px;white-space:nowrap">Portée :
+                <select id="throughput-scope" title="Choisir la portée du graphe d'activité (global, un canal ou un connecteur)">
+                    <option value="">Global (tous canaux)</option>
+                </select>
+            </label>
         </div>
         <div class="chart-wrap">
             <canvas id="throughputChart"></canvas>
@@ -376,6 +383,7 @@ const state = { samples: [], seenIds: new Set() };
 const mirthState = { samples: [], seenIds: new Set() };
 let mirthChart = null;
 let throughputChart = null;
+let throughputSamples = [];   // cache de la série d'activité (re-rendu sans refetch)
 let mirthOverviewTimer = null;
 
 // Second jeu de données temporel : les ÉVÈNEMENTS/ALERTES (table `events`).
@@ -400,6 +408,53 @@ function tsToMs(ts) { return luxon.DateTime.fromFormat(ts, "yyyy-MM-dd HH:mm:ss"
 // Estimation de l'heure serveur (basée sur la synchro clockBase), repli sur l'heure locale.
 function serverNowMs() {
     return clockBase ? clockBase.serverMs + (Date.now() - clockBase.localMs) : Date.now();
+}
+
+// Minuit du jour courant (heure serveur estimée), en millisecondes.
+function todayStartMs() {
+    return luxon.DateTime.fromMillis(serverNowMs()).startOf("day").toMillis();
+}
+
+// Bornes temporelles de l'axe X selon la période/intervalle sélectionné. Toutes
+// les courbes couvrent ainsi EXACTEMENT la fenêtre choisie (comme le graphe
+// Système de référence) : cela « respecte la période » et force l'affichage des
+// heures en HH:mm (et non à la seconde) même lorsque peu de points sont présents.
+function periodBounds() {
+    if (intervalMode) {
+        const deb = document.getElementById("date_deb").value;
+        const fin = document.getElementById("date_fin").value;
+        return {
+            min: deb ? luxon.DateTime.fromISO(deb).toMillis() : undefined,
+            max: fin ? luxon.DateTime.fromISO(fin).toMillis() : undefined,
+        };
+    }
+    const v = document.getElementById("range").value;
+    if (v === "today") return { min: todayStartMs(), max: serverNowMs() };
+    const h = parseFloat(v);
+    if (!h || h <= 0) return { min: undefined, max: undefined };   // "Tout l'historique"
+    return { min: serverNowMs() - h * 3600 * 1000, max: serverNowMs() };
+}
+
+// Configuration commune de l'axe temporel — IDENTIQUE pour tous les graphes de ce
+// patron (Système, Process Mirth, Activité Mirth). Bornée à la période courante.
+function xTimeScale(tc) {
+    const b = periodBounds();
+    return {
+        type: "time",
+        min: b.min, max: b.max,
+        time: { tooltipFormat: "dd/MM HH:mm:ss",
+                displayFormats: { minute: "HH:mm", hour: "dd/MM HH:mm", day: "dd/MM" } },
+        ticks: { color: tc.tick, maxRotation: 0, autoSkipPadding: 20 },
+        grid: { color: tc.grid }
+    };
+}
+
+// Réapplique les bornes temporelles courantes à un graphe existant (mise à jour
+// « en place »), afin qu'il suive la fenêtre/refresh sans être recréé.
+function applyTimeBounds(ch) {
+    const b = periodBounds();
+    ch.options.scales.x.min = b.min;
+    ch.options.scales.x.max = b.max;
 }
 
 // Plugin Chart.js : trace une ligne verticale à chaque évènement (boot / restart).
@@ -453,6 +508,7 @@ async function loadEventsFull() {
         alertState.seenIds = new Set(data.events.map(e => e.id));
         render();
         renderMirth();
+        renderThroughput();
     } catch (e) { /* la section système gère déjà le bandeau hors-ligne */ }
 }
 
@@ -485,7 +541,7 @@ async function loadEventsIncremental() {
                 }
             }
         }
-        if (added) { render(); renderMirth(); }
+        if (added) { render(); renderMirth(); renderThroughput(); }
     } catch (e) { /* ignore */ }
 }
 
@@ -524,12 +580,7 @@ function buildChart(samples) {
             maintainAspectRatio: false,
             interaction: { mode: "index", intersect: false },
             scales: {
-                x: {
-                    type: "time",
-                    time: { tooltipFormat: "dd/MM HH:mm:ss", displayFormats: { minute: "HH:mm", hour: "dd/MM HH:mm", day: "dd/MM" } },
-                    ticks: { color: tc.tick, maxRotation: 0, autoSkipPadding: 20 },
-                    grid: { color: tc.grid }
-                },
+                x: xTimeScale(tc),
                 y: {
                     min: 0, max: 100,
                     ticks: { color: tc.tick, callback: v => v + " %" },
@@ -557,6 +608,7 @@ function buildChart(samples) {
         chart.options.scales.y.ticks.color = tc.tick;
         chart.options.scales.y.grid.color = tc.grid;
         chart.options.plugins.legend.labels.color = tc.text;
+        applyTimeBounds(chart);
         chart.$eventMarkers = markers;
         chart.update("none");
     } else {
@@ -622,7 +674,11 @@ function currentParams() {
         if (fin) p.date_fin = fin;
         return p;
     }
-    return { hours: document.getElementById("range").value };
+    const v = document.getElementById("range").value;
+    // « Aujourd'hui » : depuis minuit (les API acceptent date_deb sans date_fin).
+    if (v === "today")
+        return { date_deb: luxon.DateTime.fromMillis(todayStartMs()).toFormat("yyyy-MM-dd HH:mm:ss") };
+    return { hours: v };
 }
 
 // (Re)dessine le graphe et les cartes à partir du cache client.
@@ -733,12 +789,7 @@ function buildMirthChart(samples) {
             maintainAspectRatio: false,
             interaction: { mode: "index", intersect: false },
             scales: {
-                x: {
-                    type: "time",
-                    time: { tooltipFormat: "dd/MM HH:mm:ss", displayFormats: { minute: "HH:mm", hour: "dd/MM HH:mm", day: "dd/MM" } },
-                    ticks: { color: tc.tick, maxRotation: 0, autoSkipPadding: 20 },
-                    grid: { color: tc.grid }
-                },
+                x: xTimeScale(tc),
                 y: {
                     min: 0, max: 100, position: "left",
                     ticks: { color: tc.tick, callback: v => v + " %" },
@@ -777,6 +828,7 @@ function buildMirthChart(samples) {
         mirthChart.options.scales.y.ticks.color = tc.tick;
         mirthChart.options.scales.y.grid.color = tc.grid;
         mirthChart.options.plugins.legend.labels.color = tc.text;
+        applyTimeBounds(mirthChart);
         mirthChart.$eventMarkers = markers;
         mirthChart.update("none");
     } else {
@@ -794,13 +846,31 @@ async function fetchThroughput(params) {
     return r.json();
 }
 
-// Charge la série globale de débit et (re)dessine le graphe d'activité.
+// Portée courante du graphe d'activité : "" => global, "CID" => un canal,
+// "CID:META" => un connecteur précis. Pilotée par le sélecteur #throughput-scope.
+function throughputScopeParams() {
+    const p = currentParams();
+    const scope = (document.getElementById("throughput-scope") || {}).value || "";
+    if (scope) {
+        const [cid, meta] = scope.split(":");
+        p.channel = cid;
+        if (meta !== undefined) p.connector = meta;
+    }
+    return p;
+}
+
+// Charge la série de débit (selon la portée choisie) et (re)dessine le graphe.
 async function loadThroughput() {
     try {
-        const data = await fetchThroughput(currentParams());
-        buildThroughputChart(data.samples || []);
+        const data = await fetchThroughput(throughputScopeParams());
+        throughputSamples = data.samples || [];
+        buildThroughputChart(throughputSamples);
     } catch (e) { /* la section système gère déjà le bandeau hors-ligne */ }
 }
+
+// Redessine le graphe d'activité depuis le cache (overlay d'évènements / thème),
+// sans refaire d'appel réseau.
+function renderThroughput() { buildThroughputChart(throughputSamples); }
 
 // Graphe d'activité : convertit les compteurs cumulatifs en débit (msg/min) par
 // delta entre points consécutifs. Une baisse du compteur (reset Mirth) => 0.
@@ -828,20 +898,17 @@ function buildThroughputChart(samples) {
     ];
 
     const tc = window.MCTheme ? MCTheme.chartColors() : { tick: "#94a3b8", grid: "rgba(148,163,184,.08)", text: "#e2e8f0" };
+    const markers = eventMarkers();   // barres verticales d'évènements, comme les autres graphes
     const cfg = {
         type: "line",
         data: { labels, datasets },
+        plugins: [eventLinesPlugin],
         options: {
             responsive: true,
             maintainAspectRatio: false,
             interaction: { mode: "index", intersect: false },
             scales: {
-                x: {
-                    type: "time",
-                    time: { tooltipFormat: "dd/MM HH:mm:ss", displayFormats: { minute: "HH:mm", hour: "dd/MM HH:mm", day: "dd/MM" } },
-                    ticks: { color: tc.tick, maxRotation: 0, autoSkipPadding: 20 },
-                    grid: { color: tc.grid }
-                },
+                x: xTimeScale(tc),
                 y: {
                     min: 0, position: "left",
                     title: { display: true, text: "msg / min", color: tc.tick },
@@ -868,9 +935,12 @@ function buildThroughputChart(samples) {
         throughputChart.options.scales.y.ticks.color = tc.tick;
         throughputChart.options.scales.y.grid.color = tc.grid;
         throughputChart.options.plugins.legend.labels.color = tc.text;
+        applyTimeBounds(throughputChart);
+        throughputChart.$eventMarkers = markers;
         throughputChart.update("none");
     } else {
         throughputChart = new Chart(document.getElementById("throughputChart"), cfg);
+        throughputChart.$eventMarkers = markers;
         throughputChart.update();
     }
 }
@@ -961,7 +1031,10 @@ function setMirthKpis(d) {
     const errs = document.getElementById("kpi-errors");
     const chans = document.getElementById("kpi-channels");
     const last = document.getElementById("kpi-lastapi");
-    if (!d || !d.reachable) {
+    // Les KPI proviennent du dernier instantané historisé : on les affiche dès
+    // qu'il existe (snapshot_at) OU qu'un appel live a abouti (repli au démarrage).
+    const hasData = d && (d.snapshot_at || d.reachable);
+    if (!hasData) {
         recv.textContent = errs.textContent = chans.textContent = "—";
         document.getElementById("kpi-errors-sub").textContent = "";
         document.getElementById("kpi-channels-sub").textContent = "";
@@ -982,38 +1055,68 @@ function setMirthKpis(d) {
     chans.textContent = started + " / " + total;
     document.getElementById("kpi-channels-sub").textContent =
         stopped > 0 ? (stopped + " arrêté(s)") : "tous démarrés";
-    const now = new Date();
-    last.textContent = now.toLocaleTimeString();
-    last.style.color = "";
-    document.getElementById("kpi-lastapi-sub").textContent = "connectée ✓";
+    // Horodatage = celui de l'instantané (fraîcheur réelle des données) ; le
+    // sous-titre reflète la joignabilité « maintenant » (appel live d'état).
+    last.textContent = d.snapshot_at
+        ? luxon.DateTime.fromFormat(d.snapshot_at, "yyyy-MM-dd HH:mm:ss").toFormat("HH:mm:ss")
+        : new Date().toLocaleTimeString();
+    last.style.color = d.reachable ? "" : "var(--warn)";
+    document.getElementById("kpi-lastapi-sub").textContent =
+        d.reachable ? "connectée ✓" : "injoignable — données du dernier relevé";
 }
 
 // Vue d'ensemble de l'API REST Mirth (bandeau + KPI + table des canaux).
 async function fetchMirthOverview() {
     const statusEl = document.getElementById("ma-status");
+    const snapEl = document.getElementById("ma-snapshot");
     try {
         const r = await fetch(`${API}/api/mirth/api`);
         const d = await r.json();
         document.getElementById("ma-url").textContent = d.base_url || "—";
-        if (!d.reachable) {
-            statusEl.innerHTML = '<span class="badge off">injoignable</span>';
-            document.getElementById("ma-version").textContent = "—";
-            document.getElementById("ma-channels").textContent = "—";
-            setMirthKpis(d);
-            renderChannels([], d.error);
-            return;
-        }
-        statusEl.innerHTML = '<span class="badge on">connectée</span>';
+        // Horodatage de l'instantané dont proviennent les canaux affichés. Les
+        // canaux/connecteurs viennent du dernier relevé historisé ; seuls l'état
+        // (joignable) et la version sont rafraîchis en direct.
+        snapEl.textContent = d.snapshot_at
+            ? luxon.DateTime.fromFormat(d.snapshot_at, "yyyy-MM-dd HH:mm:ss").toFormat("dd/MM/yyyy HH:mm:ss")
+            : "—";
+        statusEl.innerHTML = d.reachable
+            ? '<span class="badge on">connectée</span>'
+            : '<span class="badge off">injoignable</span>';
         document.getElementById("ma-version").textContent = d.version || "—";
         document.getElementById("ma-channels").textContent =
             (d.channels_started ?? 0) + " / " + (d.channel_count ?? 0);
         setMirthKpis(d);
-        renderChannels(d.channels || [], null, d.totals);
+        // On affiche les canaux du dernier instantané connu même si Mirth est
+        // injoignable « maintenant » (données potentiellement périmées).
+        renderChannels(d.channels || [], d.reachable ? null : d.error, d.totals);
+        populateThroughputScope(d.channels || []);
     } catch (e) {
         statusEl.innerHTML = '<span class="badge off">injoignable</span>';
+        snapEl.textContent = "—";
         setMirthKpis(null);
         renderChannels([], e.message);
     }
+}
+
+// Alimente le sélecteur de portée du graphe d'activité (global / par canal / par
+// connecteur) depuis la liste des canaux, en conservant la sélection courante.
+function populateThroughputScope(channels) {
+    const sel = document.getElementById("throughput-scope");
+    if (!sel) return;
+    const prev = sel.value;
+    let html = '<option value="">Global (tous canaux)</option>';
+    for (const c of channels) {
+        const cid = c.channel_id;
+        if (!cid) continue;
+        html += `<option value="${escapeHtml(cid)}">📡 ${escapeHtml(c.name || cid)}</option>`;
+        for (const conn of (c.connectors || [])) {
+            const role = conn.meta_data_id === 0 ? "Source" : "Destination " + conn.meta_data_id;
+            html += `<option value="${escapeHtml(cid)}:${conn.meta_data_id}">&nbsp;&nbsp;↳ ${escapeHtml(conn.name || role)} (${role})</option>`;
+        }
+    }
+    sel.innerHTML = html;
+    // Conserve la portée choisie si l'entité existe toujours, sinon repli global.
+    sel.value = [...sel.options].some(o => o.value === prev) ? prev : "";
 }
 
 // Construit le corps de la table des canaux Mirth.
@@ -1338,12 +1441,14 @@ document.getElementById("errors-modal").addEventListener("click", e => {
 
 document.getElementById("refresh").addEventListener("click", loadFull);
 document.getElementById("range").addEventListener("change", () => { updateRangeSummary(); loadFull(); });
+// Changement de portée du graphe d'activité (global / canal / connecteur).
+document.getElementById("throughput-scope").addEventListener("change", loadThroughput);
 document.getElementById("autorefresh").addEventListener("change", () => { setupAuto(); updateRangeSummary(); });
 document.getElementById("applyInterval").addEventListener("click", enterIntervalMode);
 document.getElementById("clearInterval").addEventListener("click", exitIntervalMode);
 
 // Re-rendu des graphiques quand le thème bascule (couleurs d'axes / légende).
-document.addEventListener("mc-theme-change", () => { if (chart) render(); if (mirthChart) renderMirth(); if (throughputChart) loadThroughput(); });
+document.addEventListener("mc-theme-change", () => { if (chart) render(); if (mirthChart) renderMirth(); if (throughputChart) renderThroughput(); });
 
 // ---------- Onglets (Mirth API / Mirth Process / Système) ----------
 const TAB_NAMES = ["api", "process", "system"];

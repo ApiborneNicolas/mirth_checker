@@ -234,34 +234,18 @@ def scheduled_mirth_check():
     _mirth_prev_found = found
 
 
-def collect_mirth_throughput():
-    """Construit le lot de relevés de débit Mirth (global + par canal) ou None.
+def scheduled_mirth_overview():
+    """Tâche programmée : historise l'overview Mirth complet (un seul appel API).
 
-    Interroge l'API REST Mirth ; si elle est injoignable, renvoie None (rien à
-    enregistrer). Les compteurs sont cumulatifs : le débit se déduit côté client.
+    Réutilise l'unique appel `get_overview()` pour persister, via
+    `database.insert_mirth_snapshot`, l'instantané serveur (totaux + version +
+    stats JVM + joignabilité) et — si joignable — l'état/les compteurs de chaque
+    canal et connecteur. Sert ensuite la page sans nouvel appel API live. Si
+    l'API est injoignable, seule la ligne serveur (reachable=0) est écrite : la
+    série se brise visiblement sur la coupure.
     """
     ov = mirth_api.get_overview(timeout=8)
-    if not ov.get("reachable"):
-        return None
-    ts = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    totals = ov.get("totals") or {}
-    rows = [{"timestamp": ts, "channel_id": None, "channel_name": None,
-             "received": totals.get("received"), "filtered": totals.get("filtered"),
-             "queued": totals.get("queued"), "sent": totals.get("sent"),
-             "error": totals.get("error")}]
-    for c in ov.get("channels", []):
-        rows.append({"timestamp": ts, "channel_id": c.get("channel_id"),
-                     "channel_name": c.get("name"), "received": c.get("received"),
-                     "filtered": c.get("filtered"), "queued": c.get("queued"),
-                     "sent": c.get("sent"), "error": c.get("error")})
-    return rows
-
-
-def scheduled_mirth_stats():
-    """Tâche programmée 'mirth_throughput' : historise le débit Mirth (cumulatif)."""
-    rows = collect_mirth_throughput()
-    if rows:
-        database.insert_throughput(rows)
+    database.insert_mirth_snapshot(ov)
 
 
 def mark_startup_events():
@@ -946,13 +930,34 @@ def _mirth_timeout(req):
 
 
 def api_mirth_api(req):
-    """Vue d'ensemble du serveur Mirth via son API REST.
+    """Vue d'ensemble du serveur Mirth, servie depuis l'HISTORIQUE.
 
-    Renvoie version, statistiques système (JVM), statuts des canaux et totaux
-    agrégés. En cas de serveur injoignable : {"reachable": false, "error": ...}
-    (HTTP 200).
+    Les canaux/connecteurs/totaux/version proviennent du dernier instantané
+    historisé par le collecteur `mirth-overview-collector` (aucun appel API lourd
+    à chaque consultation — évite la surcharge sur rafraîchissements répétés).
+    Seuls la JOIGNABILITÉ temps-réel et la version sont rafraîchies par un petit
+    appel live (`get_status`). Le champ `snapshot_at` indique l'âge des données.
+
+    En l'absence d'instantané (service tout juste démarré), bascule sur un appel
+    `get_overview()` live pour ne pas afficher une page vide.
     """
-    return mirth_api.get_overview(timeout=_mirth_timeout(req))
+    data = database.get_mirth_overview_latest()
+    base_url = mirth_api.get_config()["MIRTH_BASE_URL"]
+
+    # Pas encore d'instantané historisé : repli sur un appel live complet.
+    if not data.get("snapshot_at"):
+        ov = mirth_api.get_overview(timeout=_mirth_timeout(req))
+        ov["snapshot_at"] = None
+        return ov
+
+    status = mirth_api.get_status(timeout=_mirth_timeout(req))
+    data["base_url"] = base_url
+    # La joignabilité « maintenant » et la version priment sur l'instantané.
+    data["reachable"] = bool(status.get("reachable"))
+    if status.get("version"):
+        data["version"] = status["version"]
+    data["error"] = status.get("error")
+    return data
 
 
 def api_mirth_channels(req):
@@ -1127,25 +1132,37 @@ def api_mirth_throughput(req):
     """Historique de débit Mirth (compteurs cumulatifs reçus/envoyés/erreurs).
 
     Mêmes conventions que /api/history : ?date_deb=&date_fin= (intervalle,
-    prioritaire) ou ?hours=24. ?channel=<id> => série d'un canal ; absent => série
-    globale (tous canaux confondus). Le débit (msg/min) se calcule par delta côté
-    client.
+    prioritaire) ou ?hours=24. Sélection de la série :
+      - sans ?channel              => série GLOBALE (totaux serveur) ;
+      - ?channel=<id>              => série du canal ;
+      - ?channel=<id>&connector=<m> => série d'un connecteur précis (0=source).
+    Le débit (msg/min) se calcule par delta côté client.
     """
     date_deb = (req.get("date_deb") or "").strip() or None
     date_fin = (req.get("date_fin") or "").strip() or None
     channel_id = (req.get("channel") or "").strip() or None
+    connector = (req.get("connector") or "").strip()
+    meta_data_id = None
+    if channel_id and connector != "":
+        try:
+            meta_data_id = int(connector)
+        except ValueError:
+            meta_data_id = None
     if date_deb or date_fin:
-        rows = database.get_throughput(date_deb=date_deb, date_fin=date_fin,
-                                       channel_id=channel_id)
-        return {"channel_id": channel_id, "date_deb": date_deb, "date_fin": date_fin,
+        rows = database.get_mirth_series(date_deb=date_deb, date_fin=date_fin,
+                                         channel_id=channel_id,
+                                         meta_data_id=meta_data_id)
+        return {"channel_id": channel_id, "connector": meta_data_id,
+                "date_deb": date_deb, "date_fin": date_fin,
                 "count": len(rows), "samples": rows}
     try:
         hours = float(req.get("hours", 24))
     except ValueError:
         hours = 24
-    rows = database.get_throughput(hours=hours, channel_id=channel_id)
-    return {"channel_id": channel_id, "hours": hours, "count": len(rows),
-            "samples": rows}
+    rows = database.get_mirth_series(hours=hours, channel_id=channel_id,
+                                     meta_data_id=meta_data_id)
+    return {"channel_id": channel_id, "connector": meta_data_id, "hours": hours,
+            "count": len(rows), "samples": rows}
 
 
 def api_mirth_report(req):
@@ -1414,7 +1431,7 @@ def main():
     tasks = [
         RecurringTask(args.interval, scheduled_check, name="metrics-collector"),
         RecurringTask(args.interval, scheduled_mirth_check, name="mirth-collector"),
-        RecurringTask(args.interval, scheduled_mirth_stats, name="mirth-stats-collector"),
+        RecurringTask(args.interval, scheduled_mirth_overview, name="mirth-overview-collector"),
     ]
     start_staggered(tasks, step=args.stagger)
     print(f"[checker_service] {len(tasks)} tâches programmées démarrées "

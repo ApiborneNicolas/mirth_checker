@@ -14,6 +14,7 @@ threads du serveur web (mode WAL activé).
 import os
 import io
 import csv
+import json
 import shutil
 import sqlite3
 import datetime
@@ -51,6 +52,9 @@ def _connect(db_path):
     conn.row_factory = sqlite3.Row
     # WAL : permet la lecture pendant l'écriture (tâche programmée + serveur web)
     conn.execute("PRAGMA journal_mode=WAL;")
+    # Contraintes de clés étrangères (mirth_stats -> mirth_entity) : non actives
+    # par défaut dans SQLite, on les active explicitement à chaque connexion.
+    conn.execute("PRAGMA foreign_keys=ON;")
     return conn
 
 
@@ -159,27 +163,78 @@ def init_db(db_path=DEFAULT_DB_PATH):
             "ON mirth_messages(channel_id)"
         )
 
-        # Historique de DÉBIT Mirth : à chaque relevé, les compteurs CUMULATIFS
-        # (reçus/filtrés/en file/envoyés/erreurs) globaux (channel_id NULL) et par
-        # canal. Le débit (msg/min) se calcule par delta entre points côté client.
+        # Historisation de l'OVERVIEW Mirth (remplace l'ancienne table
+        # `mirth_throughput`, supprimée — pas de migration). Modèle relationnel
+        # « dimension + faits » alimenté à chaque tick par le même appel
+        # get_overview() : on conserve désormais l'état des canaux, le détail des
+        # connecteurs, la version et les stats JVM (et plus seulement le débit).
+        conn.execute("DROP TABLE IF EXISTS mirth_throughput")
+
+        # Dimension : identité STABLE des canaux et de leurs connecteurs.
+        # meta_data_id NULL = le canal lui-même ; 0 = connecteur source ;
+        # 1+ = connecteurs de destination. `name` est rafraîchi si renommé.
         conn.execute(
             """
-            CREATE TABLE IF NOT EXISTS mirth_throughput (
+            CREATE TABLE IF NOT EXISTS mirth_entity (
                 id            INTEGER PRIMARY KEY AUTOINCREMENT,
-                timestamp     TEXT    NOT NULL,
-                channel_id    TEXT,
-                channel_name  TEXT,
-                received      INTEGER,
-                filtered      INTEGER,
-                queued        INTEGER,
-                sent          INTEGER,
-                error         INTEGER
+                channel_id    TEXT    NOT NULL,
+                meta_data_id  INTEGER,
+                name          TEXT,
+                UNIQUE(channel_id, meta_data_id)
+            )
+            """
+        )
+
+        # Faits temporels : une ligne par entité (canal + connecteurs) à chaque
+        # relevé. Compteurs CUMULATIFS (le débit msg/min se déduit par delta côté
+        # client). Reliée à la dimension par clé étrangère.
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS mirth_stats (
+                id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                timestamp   TEXT    NOT NULL,
+                entity_id   INTEGER NOT NULL REFERENCES mirth_entity(id),
+                state       TEXT,
+                received    INTEGER,
+                filtered    INTEGER,
+                queued      INTEGER,
+                sent        INTEGER,
+                error       INTEGER
             )
             """
         )
         conn.execute(
-            "CREATE INDEX IF NOT EXISTS idx_mirth_throughput_ts "
-            "ON mirth_throughput(timestamp)"
+            "CREATE INDEX IF NOT EXISTS idx_mirth_stats_entity_ts "
+            "ON mirth_stats(entity_id, timestamp)"
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_mirth_stats_ts ON mirth_stats(timestamp)"
+        )
+
+        # Instantané SERVEUR par tick : totaux globaux + version + stats JVM
+        # (JSON) + joignabilité. La dernière ligne joignable sert à reconstruire
+        # la vue d'ensemble servie à la page (sans appel API live).
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS mirth_server (
+                id                INTEGER PRIMARY KEY AUTOINCREMENT,
+                timestamp         TEXT    NOT NULL,
+                reachable         INTEGER,
+                version           TEXT,
+                channel_count     INTEGER,
+                channels_started  INTEGER,
+                received          INTEGER,
+                filtered          INTEGER,
+                queued            INTEGER,
+                sent              INTEGER,
+                error             INTEGER,
+                system_stats      TEXT,
+                error_text        TEXT
+            )
+            """
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_mirth_server_ts ON mirth_server(timestamp)"
         )
 
         # Second jeu de données temporel : les ÉVÈNEMENTS/ALERTES. Indépendant des
@@ -501,82 +556,226 @@ def upsert_mirth_messages(items, db_path=DEFAULT_DB_PATH):
 
 
 # ==========================================================================
-# HISTORIQUE DE DÉBIT MIRTH (table `mirth_throughput`)
-# Compteurs cumulatifs relevés périodiquement ; le débit se déduit par delta.
+# HISTORISATION DE L'OVERVIEW MIRTH (tables `mirth_entity` / `mirth_stats` /
+# `mirth_server`). Modèle « dimension + faits » : la dernière ligne serveur
+# joignable + ses faits reconstruisent la vue d'ensemble servie à la page,
+# sans appel API live. Compteurs cumulatifs ; le débit se déduit par delta.
 # ==========================================================================
-def insert_throughput(rows, db_path=DEFAULT_DB_PATH):
-    """Insère un lot de relevés de débit (globaux et/ou par canal).
+# Colonnes de compteurs partagées par les faits canal/connecteur et les totaux.
+_STAT_FIELDS = ("received", "filtered", "queued", "sent", "error")
 
-    Chaque ligne est un dict {timestamp, channel_id (None=global), channel_name,
-    received, filtered, queued, sent, error}. Retourne le nombre de lignes insérées.
+
+def _get_or_create_entity(conn, channel_id, meta_data_id, name):
+    """Retourne l'id d'une entité (canal/connecteur), en la créant au besoin.
+
+    Clé d'identité : (channel_id, meta_data_id). meta_data_id None = le canal.
+    Rafraîchit `name` s'il a changé. (SELECT puis INSERT — pas d'UPSERT/RETURNING,
+    pour rester compatible avec toutes les versions de SQLite embarquées.)
     """
-    rows = [r for r in rows if r]
-    if not rows:
-        return 0
-    now = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    row = conn.execute(
+        "SELECT id, name FROM mirth_entity WHERE channel_id IS ? AND meta_data_id IS ?",
+        (channel_id, meta_data_id),
+    ).fetchone()
+    if row:
+        if name is not None and row["name"] != name:
+            conn.execute("UPDATE mirth_entity SET name = ? WHERE id = ?",
+                         (name, row["id"]))
+        return row["id"]
+    cur = conn.execute(
+        "INSERT INTO mirth_entity (channel_id, meta_data_id, name) VALUES (?, ?, ?)",
+        (channel_id, meta_data_id, name),
+    )
+    return cur.lastrowid
+
+
+def insert_mirth_snapshot(overview, timestamp=None, db_path=DEFAULT_DB_PATH):
+    """Historise un instantané complet de l'overview Mirth (un seul tick).
+
+    `overview` est la structure renvoyée par mirth_api.get_overview() :
+    {reachable, error, version, system_stats, channels:[{channel_id, name, state,
+    received…error, connectors:[{meta_data_id, name, state, received…error}]}],
+    channel_count, channels_started, totals}.
+
+    Écrit en une seule transaction : une ligne `mirth_server` (totaux + version +
+    stats JVM + joignabilité), et — si joignable — une ligne `mirth_stats` par
+    entité (canal + connecteurs), les entités étant créées/mises à jour dans
+    `mirth_entity`. Si l'API est injoignable, seule la ligne serveur est écrite
+    (reachable=0 + error_text) : la série se brise visiblement sur la coupure.
+    """
+    ts = timestamp or datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    reachable = bool(overview.get("reachable"))
+    totals = overview.get("totals") or {}
     conn = _connect(db_path)
     try:
-        for r in rows:
-            conn.execute(
-                "INSERT INTO mirth_throughput "
-                "(timestamp, channel_id, channel_name, received, filtered, queued, sent, error) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-                (r.get("timestamp") or now, r.get("channel_id"), r.get("channel_name"),
-                 r.get("received"), r.get("filtered"), r.get("queued"),
-                 r.get("sent"), r.get("error")),
-            )
+        conn.execute(
+            "INSERT INTO mirth_server "
+            "(timestamp, reachable, version, channel_count, channels_started, "
+            " received, filtered, queued, sent, error, system_stats, error_text) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (ts, 1 if reachable else 0, overview.get("version"),
+             overview.get("channel_count"), overview.get("channels_started"),
+             totals.get("received"), totals.get("filtered"), totals.get("queued"),
+             totals.get("sent"), totals.get("error"),
+             json.dumps(overview.get("system_stats") or {}),
+             None if reachable else overview.get("error")),
+        )
+
+        if reachable:
+            for c in overview.get("channels", []):
+                cid = c.get("channel_id")
+                if cid is None:
+                    continue
+                # Le canal lui-même (meta_data_id NULL).
+                eid = _get_or_create_entity(conn, cid, None, c.get("name"))
+                _insert_stat_row(conn, ts, eid, c)
+                # Ses connecteurs (source 0, destinations 1+).
+                for conn_row in c.get("connectors", []):
+                    mid = conn_row.get("meta_data_id")
+                    ceid = _get_or_create_entity(conn, cid, mid, conn_row.get("name"))
+                    _insert_stat_row(conn, ts, ceid, conn_row)
         conn.commit()
-        return len(rows)
     finally:
         conn.close()
 
 
-def get_throughput(hours=24, date_deb=None, date_fin=None, channel_id=None,
-                   limit=20000, db_path=DEFAULT_DB_PATH):
-    """Retourne les relevés de débit triés du plus ancien au plus récent.
+def _insert_stat_row(conn, ts, entity_id, src):
+    """Insère une ligne de faits (`mirth_stats`) pour une entité donnée."""
+    conn.execute(
+        "INSERT INTO mirth_stats "
+        "(timestamp, entity_id, state, received, filtered, queued, sent, error) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        (ts, entity_id, src.get("state"), src.get("received"), src.get("filtered"),
+         src.get("queued"), src.get("sent"), src.get("error")),
+    )
+
+
+def get_mirth_overview_latest(db_path=DEFAULT_DB_PATH):
+    """Reconstruit la dernière vue d'ensemble Mirth historisée (sans appel API).
+
+    S'appuie sur la dernière ligne `mirth_server` JOIGNABLE (reachable=1) et sur
+    les `mirth_stats` de son horodatage, jointes à `mirth_entity`. Renvoie une
+    structure compatible avec mirth_api.get_overview() (version, totaux, canaux
+    avec leurs connecteurs et états) augmentée de `snapshot_at` (horodatage de
+    l'instantané). Renvoie {reachable: False, snapshot_at: None, …} si aucun
+    instantané joignable n'est encore disponible.
+    """
+    empty = {"version": None, "channel_count": 0, "channels_started": 0,
+             "totals": {k: 0 for k in _STAT_FIELDS}, "channels": [],
+             "system_stats": {}, "snapshot_at": None}
+    conn = _connect(db_path)
+    try:
+        srv = conn.execute(
+            "SELECT * FROM mirth_server WHERE reachable = 1 ORDER BY id DESC LIMIT 1"
+        ).fetchone()
+        if not srv:
+            return empty
+
+        ts = srv["timestamp"]
+        rows = conn.execute(
+            "SELECT e.channel_id AS channel_id, e.meta_data_id AS meta_data_id, "
+            "       e.name AS name, s.state AS state, s.received AS received, "
+            "       s.filtered AS filtered, s.queued AS queued, s.sent AS sent, "
+            "       s.error AS error "
+            "FROM mirth_stats s JOIN mirth_entity e ON e.id = s.entity_id "
+            "WHERE s.timestamp = ?", (ts,),
+        ).fetchall()
+    finally:
+        conn.close()
+
+    # Regroupe les faits par canal : la ligne meta_data_id NULL est le canal,
+    # les autres sont ses connecteurs.
+    channels = {}
+    connectors = {}
+    for r in rows:
+        cid = r["channel_id"]
+        if r["meta_data_id"] is None:
+            channels[cid] = {
+                "channel_id": cid, "name": r["name"], "state": r["state"],
+                **{k: r[k] for k in _STAT_FIELDS}, "connectors": [],
+            }
+        else:
+            connectors.setdefault(cid, []).append({
+                "meta_data_id": r["meta_data_id"], "name": r["name"],
+                "state": r["state"], **{k: r[k] for k in _STAT_FIELDS},
+            })
+    for cid, conns in connectors.items():
+        conns.sort(key=lambda c: (c["meta_data_id"] is None, c["meta_data_id"]))
+        if cid in channels:
+            channels[cid]["connectors"] = conns
+
+    return {
+        "version": srv["version"],
+        "channel_count": srv["channel_count"],
+        "channels_started": srv["channels_started"],
+        "totals": {k: srv[k] for k in _STAT_FIELDS},
+        "channels": sorted(channels.values(),
+                           key=lambda c: (c.get("name") or "").lower()),
+        "system_stats": json.loads(srv["system_stats"] or "{}"),
+        "snapshot_at": ts,
+    }
+
+
+def get_mirth_series(hours=24, date_deb=None, date_fin=None, channel_id=None,
+                     meta_data_id=None, limit=20000, db_path=DEFAULT_DB_PATH):
+    """Série temporelle de compteurs Mirth, du plus ancien au plus récent.
 
     Mêmes modes de sélection que `get_history` (intervalle prioritaire, sinon
-    dernières `hours` heures). `channel_id=None` => série GLOBALE (lignes dont
-    channel_id est NULL) ; sinon, série du canal indiqué.
+    dernières `hours` heures). Sélection de la série :
+      - channel_id None  => série GLOBALE (totaux de `mirth_server`) ;
+      - channel_id + meta_data_id None => série du canal (`mirth_stats`) ;
+      - channel_id + meta_data_id      => série d'un connecteur précis.
+
+    Chaque point : {timestamp, received, filtered, queued, sent, error}.
     """
     deb = _normalize_bound(date_deb, end=False)
     fin = _normalize_bound(date_fin, end=True)
 
-    conn = _connect(db_path)
-    try:
+    def _time_clause(prefix=""):
         clauses, params = [], []
-        if channel_id:
-            clauses.append("channel_id = ?")
-            params.append(channel_id)
-        else:
-            clauses.append("channel_id IS NULL")
-
         if deb or fin:
             if deb:
-                clauses.append("timestamp >= ?")
+                clauses.append(f"{prefix}timestamp >= ?")
                 params.append(deb)
             if fin:
-                clauses.append("timestamp <= ?")
+                clauses.append(f"{prefix}timestamp <= ?")
                 params.append(fin)
         elif hours and hours > 0:
             since = (datetime.datetime.now()
                      - datetime.timedelta(hours=hours)).strftime("%Y-%m-%d %H:%M:%S")
-            clauses.append("timestamp >= ?")
+            clauses.append(f"{prefix}timestamp >= ?")
             params.append(since)
+        return clauses, params
 
-        where = "WHERE " + " AND ".join(clauses)
-        params.append(limit)
-        cur = conn.execute(
-            f"""
-            SELECT * FROM (
-                SELECT * FROM mirth_throughput
-                {where}
-                ORDER BY timestamp DESC
-                LIMIT ?
-            ) ORDER BY timestamp ASC
-            """,
-            params,
-        )
+    cols = ", ".join(_STAT_FIELDS)
+    conn = _connect(db_path)
+    try:
+        if not channel_id:
+            # Série globale : totaux de la table serveur (relevés joignables).
+            clauses, params = _time_clause()
+            clauses.append("reachable = 1")
+            where = "WHERE " + " AND ".join(clauses)
+            params.append(limit)
+            cur = conn.execute(
+                f"SELECT * FROM (SELECT timestamp, {cols} FROM mirth_server "
+                f"{where} ORDER BY timestamp DESC LIMIT ?) ORDER BY timestamp ASC",
+                params,
+            )
+        else:
+            # Série d'une entité (canal ou connecteur) via la dimension.
+            clauses, params = _time_clause("s.")
+            clauses.append("e.channel_id IS ?")
+            params.append(channel_id)
+            clauses.append("e.meta_data_id IS ?")
+            params.append(meta_data_id)
+            where = "WHERE " + " AND ".join(clauses)
+            params.append(limit)
+            cur = conn.execute(
+                f"SELECT * FROM (SELECT s.timestamp AS timestamp, "
+                f"{', '.join('s.' + f for f in _STAT_FIELDS)} "
+                f"FROM mirth_stats s JOIN mirth_entity e ON e.id = s.entity_id "
+                f"{where} ORDER BY s.timestamp DESC LIMIT ?) ORDER BY timestamp ASC",
+                params,
+            )
         return [dict(row) for row in cur.fetchall()]
     finally:
         conn.close()
@@ -685,7 +884,7 @@ def purge_older_than(days=30, db_path=DEFAULT_DB_PATH):
         # (relevés Mirth, débit, évènements/alertes). Tables possiblement absentes
         # sur d'anciennes bases : on ignore l'erreur correspondante. (Le cache des
         # messages en erreur `mirth_messages` est purgé par sa propre colonne plus bas.)
-        for tbl in ("mirth_metrics", "mirth_throughput", "events"):
+        for tbl in ("mirth_metrics", "mirth_stats", "mirth_server", "events"):
             try:
                 conn.execute(f"DELETE FROM {tbl} WHERE timestamp < ?", (cutoff,))
             except sqlite3.Error:
@@ -890,8 +1089,11 @@ def reset_db(db_path=DEFAULT_DB_PATH):
                 deleted = 0
             conn.execute("DELETE FROM metrics")
             # Vide aussi les autres jeux de données (relevés Mirth, cache des
-            # messages en erreur, débit, évènements/alertes).
-            for tbl in ("mirth_metrics", "mirth_messages", "mirth_throughput", "events"):
+            # messages en erreur, overview historisé, évènements/alertes). Les
+            # faits (`mirth_stats`) avant la dimension (`mirth_entity`) à cause de
+            # la clé étrangère.
+            for tbl in ("mirth_metrics", "mirth_messages", "mirth_stats",
+                        "mirth_server", "mirth_entity", "events"):
                 try:
                     conn.execute(f"DELETE FROM {tbl}")
                 except sqlite3.Error:
@@ -900,7 +1102,8 @@ def reset_db(db_path=DEFAULT_DB_PATH):
             try:
                 conn.execute(
                     "DELETE FROM sqlite_sequence WHERE name IN "
-                    "('metrics', 'mirth_metrics', 'mirth_messages', 'mirth_throughput', 'events')"
+                    "('metrics', 'mirth_metrics', 'mirth_messages', 'mirth_stats', "
+                    "'mirth_server', 'mirth_entity', 'events')"
                 )
             except sqlite3.Error:
                 pass
