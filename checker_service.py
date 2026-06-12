@@ -24,10 +24,12 @@ Lancement :
 """
 
 import os
+import re
 import sys
 import math
 import argparse
 import datetime
+import threading
 
 from tabulate import tabulate
 
@@ -103,6 +105,7 @@ TABLE_MIRTH_METRICS = "mirth_metrics"
 EVENT_COLORS = {
     "boot": "#ef4444",      # rouge — démarrage du système
     "service": "#22c55e",   # vert — start/stop du checker
+    "systeme": "#ef4444",   # rouge — évènements système (boot + checker, regroupés)
     "mirth": "#a78bfa",     # violet — start/stop du processus Mirth
     "alarm": "#f59e0b",     # orange — alarme (mail ou autre)
     "mail": "#f472b6",      # rose — envoi d'email
@@ -117,6 +120,260 @@ def _event_color(category, color=None):
     if color:
         return color
     return EVENT_COLORS.get((category or "").strip().lower(), EVENT_COLORS["info"])
+
+
+# ==========================================================================
+# ALARMES & ALERTES (notifications sortantes)
+# ==========================================================================
+# Catalogue des ALARMES connues : les évènements que les tâches de relevé savent
+# détecter et pour lesquels une alerte peut être émise. Chaque alarme porte :
+#   - code         : identifiant stable (clé de configuration en base) ;
+#   - title        : libellé lisible (page de configuration + e-mail) ;
+#   - event_label  : libellé inscrit dans la table `events` (inchangé, pour que
+#                    les barres verticales des graphes restent identiques) ;
+#   - category     : catégorie d'évènement (couleur/regroupement) ;
+#   - severity     : gravité indicative (critical / warning / info) ;
+#   - default_email: état OUI/NON par défaut de la notification e-mail (proposé
+#                    par la page tant que rien n'a été enregistré).
+ALARM_CATALOG = [
+    {"code": "system_boot",  "title": "Démarrage système",
+     "event_label": "Démarrage système",     "category": "systeme",
+     "severity": "critical", "default_email": True,  "default_mqtt": True},
+    {"code": "checker_down", "title": "Arrêt du checker",
+     "event_label": "Arrêt du checker",      "category": "systeme",
+     "severity": "info",     "default_email": False, "default_mqtt": False},
+    {"code": "checker_up",   "title": "Démarrage du checker",
+     "event_label": "Démarrage du checker",  "category": "systeme",
+     "severity": "warning",  "default_email": True,  "default_mqtt": True},
+    {"code": "mirth_down",   "title": "Arrêt du processus Mirth",
+     "event_label": "Arrêt Mirth",          "category": "mirth",
+     "severity": "critical", "default_email": True,  "default_mqtt": True},
+    {"code": "mirth_up",     "title": "Démarrage du processus Mirth",
+     "event_label": "Démarrage Mirth",       "category": "mirth",
+     "severity": "warning",  "default_email": True,  "default_mqtt": True},
+]
+ALARM_BY_CODE = {a["code"]: a for a in ALARM_CATALOG}
+
+# Méthodes de notification. Seul l'e-mail est opérationnel ; MQTT est un
+# emplacement réservé (la page l'affiche désactivé, « à venir »). `active` pilote
+# l'affichage côté page ; l'envoi réel n'est implémenté que pour 'email'.
+ALERT_METHODS = [
+    {"method": "email", "label": "E-mail", "active": True,
+     "placeholder": "adresse1@exemple.fr, adresse2@exemple.fr"},
+    {"method": "mqtt",  "label": "MQTT",  "active": False,
+     "placeholder": "broker:port / topic (à venir)"},
+]
+
+
+def _split_recipients(raw):
+    """Découpe une liste de destinataires (virgule / point-virgule / saut de ligne)."""
+    if not raw:
+        return []
+    parts = re.split(r"[,;\n\r]+", str(raw))
+    return [p.strip() for p in parts if p.strip()]
+
+
+def _build_alarm_context(code, timestamp):
+    """Rassemble un contexte détaillé pour le corps de l'alerte (lectures locales).
+
+    N'effectue aucun appel réseau : l'état système et Mirth provient des derniers
+    relevés historisés en base, afin que la construction du message reste rapide et
+    fiable même au moment d'un incident.
+    """
+    entry = ALARM_BY_CODE.get(code, {})
+    ctx = {
+        "code": code,
+        "title": entry.get("title", code),
+        "severity": entry.get("severity", "info"),
+        "category": entry.get("category", "info"),
+        "timestamp": timestamp,
+        "hostname": system_state.get_hostname(),
+        "os": f"{system_state.get_os_name()} ({system_state.get_os_version()})",
+    }
+    # Dernier relevé système connu (machine hôte).
+    sysm = database.get_last_valid(tag=TAG_SYSTEM) or {}
+    ctx["system"] = {
+        "timestamp": sysm.get("timestamp"),
+        "cpu_percent": sysm.get("cpu_percent"),
+        "mem_percent": sysm.get("mem_percent"),
+        "disk_percent": sysm.get("disk_percent"),
+    }
+    # Dernier relevé du processus Mirth + vue d'ensemble historisée.
+    procm = database.get_last_valid(table=TABLE_MIRTH_METRICS, tag=None) or {}
+    ctx["mirth_process"] = {
+        "timestamp": procm.get("timestamp"),
+        "cpu_percent": procm.get("cpu_percent"),
+        "mem_percent": procm.get("mem_percent"),
+        "sockets": procm.get("sockets"),
+    }
+    ov = database.get_mirth_overview_latest() or {}
+    totals = ov.get("totals") or {}
+    ctx["mirth_overview"] = {
+        "version": ov.get("version"),
+        "channel_count": ov.get("channel_count"),
+        "channels_started": ov.get("channels_started"),
+        "errors": totals.get("error"),
+        "snapshot_at": ov.get("snapshot_at"),
+    }
+    return ctx
+
+
+def _pct(v):
+    """Formate un pourcentage (ou '—' si inconnu)."""
+    return f"{v:.0f} %" if isinstance(v, (int, float)) else "—"
+
+
+def build_alert_email(ctx):
+    """Construit (sujet, message, html) d'une alerte à partir de son contexte.
+
+    Renvoie un corps texte riche et une variante HTML. La pièce jointe (PJ) n'est
+    pas générée pour l'instant ; le contexte rassemblé ici la rendrait possible
+    plus tard (cf. quickmail.sendmail(attachment_name, attachment_content)).
+    """
+    sev = {"critical": "🔴 CRITIQUE", "warning": "🟠 AVERTISSEMENT",
+           "info": "🔵 INFORMATION"}.get(ctx["severity"], ctx["severity"])
+    subject = f"[Mirth Checker] {ctx['title']} — {ctx['hostname']}"
+
+    s = ctx["system"]
+    p = ctx["mirth_process"]
+    o = ctx["mirth_overview"]
+    lines = [
+        f"ALERTE MIRTH CHECKER — {ctx['title']}",
+        "=" * 52,
+        f"Gravité        : {sev}",
+        f"Horodatage     : {ctx['timestamp']}",
+        f"Hôte           : {ctx['hostname']}",
+        f"Système        : {ctx['os']}",
+        "",
+        "— État système (dernier relevé) —————————————————————",
+        f"  Relevé       : {s.get('timestamp') or '—'}",
+        f"  CPU          : {_pct(s.get('cpu_percent'))}",
+        f"  Mémoire      : {_pct(s.get('mem_percent'))}",
+        f"  Disque       : {_pct(s.get('disk_percent'))}",
+        "",
+        "— Processus Mirth (dernier relevé) ——————————————————",
+        f"  Relevé       : {p.get('timestamp') or '—'}",
+        f"  CPU          : {_pct(p.get('cpu_percent'))}",
+        f"  Mémoire      : {_pct(p.get('mem_percent'))}",
+        f"  Sockets      : {p.get('sockets') if p.get('sockets') is not None else '—'}",
+        "",
+        "— Serveur Mirth (dernier instantané) ————————————————",
+        f"  Version      : {o.get('version') or '—'}",
+        f"  Canaux       : {o.get('channels_started') if o.get('channels_started') is not None else '—'}"
+        f" / {o.get('channel_count') if o.get('channel_count') is not None else '—'} démarrés",
+        f"  Erreurs      : {o.get('errors') if o.get('errors') is not None else '—'}",
+        f"  Instantané   : {o.get('snapshot_at') or '—'}",
+        "",
+        "—",
+        "Message automatique du service de supervision Mirth Checker.",
+    ]
+    message = "\n".join(lines)
+    html = (
+        "<div style=\"font-family:'Segoe UI',Arial,sans-serif;color:#1e293b\">"
+        f"<h2 style='margin:0 0 4px'>{ctx['title']}</h2>"
+        f"<p style='margin:0 0 14px;color:#64748b'>{sev} · {ctx['timestamp']} · "
+        f"{ctx['hostname']}</p>"
+        "<pre style=\"background:#f1f5f9;border:1px solid #cbd5e1;border-radius:8px;"
+        "padding:12px 14px;font-size:13px;white-space:pre-wrap\">"
+        f"{message}</pre></div>"
+    )
+    return subject, message, html
+
+
+def _deliver(method, recipient, ctx):
+    """Émet une notification via `method` vers `recipient` pour le contexte `ctx`.
+
+    Retourne une liste de résultats {method, dest, ok[, error]} (un par
+    destinataire pour l'e-mail). Seul l'e-mail est implémenté ; les autres méthodes
+    renvoient un résultat d'échec « non implémentée ».
+    """
+    if method == "email":
+        recipients = _split_recipients(recipient)
+        if not recipients:
+            return [{"method": "email", "dest": None, "ok": False,
+                     "error": "aucun destinataire e-mail configuré"}]
+        subject, message, html = build_alert_email(ctx)
+        out = []
+        for dest in recipients:
+            ok = quickmail.sendmail(sujet=subject, message=message, dest=dest, html=html)
+            out.append({"method": "email", "dest": dest, "ok": bool(ok)})
+        return out
+    return [{"method": method, "dest": recipient or None, "ok": False,
+             "error": f"méthode « {method} » non implémentée"}]
+
+
+def dispatch_alerts(code, timestamp, config=None, test=False):
+    """Émet l'ensemble des notifications activées pour une alarme (envoi multiple).
+
+    N'écrit JAMAIS en base : l'évènement associé est inséré séparément par
+    `emit_alarm`. Cette fonction est donc réutilisée telle quelle par le bouton
+    « tester l'alerte » (envoi seul, sans enregistrement).
+
+    Args:
+        code (str): code d'alarme du catalogue.
+        timestamp (str): horodatage utilisé dans le message.
+        config (dict|None): configuration {methods, rules} à imposer (instantané
+            courant de la page, éventuellement non enregistré). Si None, la
+            configuration enregistrée est lue en base.
+        test (bool): préfixe le titre par [TEST].
+
+    Returns:
+        list[dict]: résultats d'envoi {method, dest, ok[, error]}.
+    """
+    try:
+        cfg = config if config is not None else database.get_alert_config()
+    except Exception as e:
+        print(f"[checker_service] Alerte {code} : lecture config impossible ({e}).")
+        return []
+
+    rules = (cfg.get("rules") or {}).get(code, {})
+    methods = cfg.get("methods") or {}
+
+    ctx = _build_alarm_context(code, timestamp)
+    if test:
+        ctx["title"] = "[TEST] " + ctx["title"]
+
+    results = []
+    for method, enabled in rules.items():
+        if not enabled:
+            continue
+        m = methods.get(method) or {}
+        if not m.get("enabled"):
+            continue  # méthode globalement désactivée
+        for res in _deliver(method, m.get("recipient"), ctx):
+            results.append(res)
+            tag = "TEST " if test else ""
+            state = "envoyée" if res["ok"] else ("ECHEC : " + res.get("error", "erreur"))
+            print(f"[checker_service] Alerte {tag}{code} via {res['method']} -> "
+                  f"{res.get('dest') or '-'} : {state}.")
+    return results
+
+
+def emit_alarm(code, timestamp=None, dedup=False):
+    """Enregistre l'évènement d'une alarme et déclenche ses notifications.
+
+    Point d'entrée unique des alarmes : insère la barre d'évènement (table
+    `events`, libellé/couleur inchangés) puis, si un NOUVEL évènement a réellement
+    été créé, lance l'envoi des notifications dans un thread dédié (non bloquant
+    pour la tâche de relevé). `dedup=True` évite de ré-alerter pour un évènement
+    déjà enregistré (ex. même boot système au redémarrage du checker).
+
+    Returns:
+        int|None: l'identifiant de l'évènement inséré, ou None si ignoré (dedup).
+    """
+    entry = ALARM_BY_CODE.get(code)
+    if not entry:
+        print(f"[checker_service] Alarme inconnue : {code!r} — ignorée.")
+        return None
+    ts = timestamp or datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    eid = database.insert_event(
+        timestamp=ts, category=entry["category"], label=entry["event_label"],
+        color=_event_color(entry["category"]), source="scheduler", dedup=dedup)
+    # Un évènement réellement créé (non dédupliqué) déclenche la notification.
+    if eid is not None:
+        threading.Thread(target=dispatch_alerts, args=(code, ts),
+                         name=f"alert-{code}", daemon=True).start()
+    return eid
 
 
 # État précédent du processus Mirth (présent/absent) entre deux relevés, afin de
@@ -224,12 +481,10 @@ def scheduled_mirth_check():
     found = sample["cpu_percent"] is not None
     if _mirth_prev_found is not None and found != _mirth_prev_found:
         if found:
-            database.insert_event(category="mirth", label="Démarrage Mirth",
-                                  color=_event_color("mirth"), source="scheduler")
+            emit_alarm("mirth_up")
             print("[checker_service] Alerte : démarrage du processus Mirth détecté.")
         else:
-            database.insert_event(category="mirth", label="Arrêt Mirth",
-                                  color=_event_color("mirth"), source="scheduler")
+            emit_alarm("mirth_down")
             print("[checker_service] Alerte : arrêt du processus Mirth détecté.")
     _mirth_prev_found = found
 
@@ -276,9 +531,7 @@ def mark_startup_events():
         gap_str = gap_dt.strftime(fmt)
         if gap_dt < now and database.insert_event_marker(gap_str, "restart"):
             print(f"[checker_service] Marqueur d'arrêt inséré à {gap_str}.")
-            database.insert_event(timestamp=gap_str, category="service",
-                                  label="Arrêt du checker", color=_event_color("service"),
-                                  source="scheduler", dedup=True)
+            emit_alarm("checker_down", timestamp=gap_str, dedup=True)
 
     # 1bis. Même marqueur d'arrêt sur la courbe du processus Mirth (table dédiée),
     #       pour qu'elle se brise aussi pendant la coupure du checker.
@@ -296,9 +549,7 @@ def mark_startup_events():
                 print(f"[checker_service] Marqueur d'arrêt Mirth inséré à {mgap_str}.")
 
     # 2. Alerte de démarrage du checker (toujours, à l'instant présent).
-    database.insert_event(timestamp=now.strftime(fmt), category="service",
-                          label="Démarrage du checker", color=_event_color("service"),
-                          source="scheduler")
+    emit_alarm("checker_up", timestamp=now.strftime(fmt))
 
     # 3. Démarrage système, si un boot a eu lieu depuis le dernier relevé : marqueur
     #    nul 'boot' (brise la courbe système) + alerte 'boot' (barre sur tous les graphes).
@@ -310,9 +561,7 @@ def mark_startup_events():
         boot_str = boot_dt.strftime(fmt)
         if database.insert_event_marker(boot_str, "boot"):
             print(f"[checker_service] Marqueur de démarrage système inséré à {boot_str}.")
-        database.insert_event(timestamp=boot_str, category="boot",
-                              label="Démarrage système", color=_event_color("boot"),
-                              source="scheduler", dedup=True)
+        emit_alarm("system_boot", timestamp=boot_str, dedup=True)
 
 
 # ==========================================================================
@@ -1284,6 +1533,105 @@ def api_mail(req):
 
 
 # ==========================================================================
+# API : CONFIGURATION DES ALERTES (page alerte.html)
+# ==========================================================================
+def api_alerts_config(req):
+    """Catalogue des alarmes + méthodes + configuration enregistrée.
+
+    Sert à peupler la page de configuration : la liste des alarmes connues, la
+    liste des méthodes de notification (e-mail actif ; MQTT/SMS/Slack réservés) et
+    l'état courant (destinataires + matrice OUI/NON) lu en base.
+    """
+    return {
+        "alarms": ALARM_CATALOG,
+        "methods": ALERT_METHODS,
+        "config": database.get_alert_config(),
+    }
+
+
+def api_alerts_save(req):
+    """Enregistre la configuration des alertes : destinataires + matrice OUI/NON.
+
+    Corps JSON attendu :
+      {
+        "methods": {"email": {"enabled": true, "recipient": "a@b, c@d"}, ...},
+        "rules":   {"mirth_down": {"email": true}, ...}
+      }
+    """
+    data = req.json() if req.body else {}
+    methods = data.get("methods")
+    rules = data.get("rules")
+    if not isinstance(methods, dict) and not isinstance(rules, dict):
+        return (400, {"ok": False, "error": "Corps invalide : 'methods' et/ou 'rules' attendus."})
+    # Ne conserve que des codes/méthodes connus (anti-pollution de la table).
+    valid_methods = {m["method"] for m in ALERT_METHODS}
+    methods = {k: v for k, v in (methods or {}).items()
+               if k in valid_methods and isinstance(v, dict)}
+    rules = {code: {m: bool(en) for m, en in by.items() if m in valid_methods}
+             for code, by in (rules or {}).items()
+             if code in ALARM_BY_CODE and isinstance(by, dict)}
+    database.save_alert_config(methods=methods, rules=rules)
+    return {"ok": True, "config": database.get_alert_config()}
+
+
+def api_alerts_test(req):
+    """Teste l'envoi d'une MÉTHODE (bouton de fin de ligne du 1er tableau).
+
+    N'écrit pas en base : envoie un message de test via une seule méthode, vers son
+    destinataire courant (valeur éventuellement non enregistrée, saisie dans la
+    page ; à défaut, celle enregistrée). Envoi synchrone, résultat par destinataire.
+
+    Corps JSON : {"method": "email"|"mqtt", "recipient": "...", "code": "..."}.
+    `code` ne sert qu'à bâtir un message représentatif (défaut : 1re alarme).
+    """
+    data = req.json() if req.body else {}
+    method = data.get("method") or "email"
+    if method not in {m["method"] for m in ALERT_METHODS}:
+        return (400, {"ok": False, "error": f"Méthode inconnue : {method}."})
+    code = data.get("code")
+    if code not in ALARM_BY_CODE:
+        code = ALARM_CATALOG[0]["code"]
+
+    recipient = data.get("recipient")
+    if not recipient:
+        recipient = (database.get_alert_methods().get(method) or {}).get("recipient")
+
+    ctx = _build_alarm_context(code, datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
+    ctx["title"] = "[TEST] " + ctx["title"]
+    results = _deliver(method, recipient, ctx)
+    return {"ok": bool(results) and all(r["ok"] for r in results), "results": results}
+
+
+def api_alerts_test_alarm(req):
+    """Teste une ALARME complète (bouton de fin de ligne du 2e tableau).
+
+    Envoi MULTIPLE via toutes les méthodes activées pour cette alarme, SANS aucun
+    enregistrement en base (ni évènement, ni relevé) — utile en test/dev. Réutilise
+    `dispatch_alerts` (qui n'écrit jamais en base ; seul `emit_alarm` insère
+    l'évènement, et il n'est pas appelé ici).
+
+    Corps JSON : {"code": "...", "methods": {...}, "rules": {...}}. Si `methods`/
+    `rules` sont fournis (instantané courant de la page, possiblement non
+    enregistré), ils priment ; sinon la configuration enregistrée est utilisée.
+    """
+    data = req.json() if req.body else {}
+    code = data.get("code")
+    if code not in ALARM_BY_CODE:
+        return (400, {"ok": False, "error": "Code d'alarme inconnu."})
+
+    config = None
+    if isinstance(data.get("methods"), dict) or isinstance(data.get("rules"), dict):
+        config = {"methods": data.get("methods") or {}, "rules": data.get("rules") or {}}
+
+    ts = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    results = dispatch_alerts(code, ts, config=config, test=True)
+    if not results:
+        return {"ok": False, "results": [],
+                "error": "Aucune méthode activée pour cette alarme (ou aucun destinataire)."}
+    return {"ok": all(r["ok"] for r in results), "results": results}
+
+
+# ==========================================================================
 # API : IDENTITÉ MACHINE (hostname / boot / heure locale)
 # ==========================================================================
 def api_hostinfo(req):
@@ -1373,6 +1721,12 @@ def build_router(tasks, started_at):
 
     # API email
     router.post("/api/mail", api_mail)
+
+    # API configuration des alertes (page alerte.html)
+    router.get("/api/alerts/config", api_alerts_config)
+    router.post("/api/alerts/save", api_alerts_save)
+    router.post("/api/alerts/test", api_alerts_test)
+    router.post("/api/alerts/test-alarm", api_alerts_test_alarm)
 
     # API statut
     router.get("/api/status", make_api_status(tasks, started_at))

@@ -1,0 +1,431 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Mirth Checker — Alertes</title>
+    <!-- Thème (anti-flash : pose data-theme avant le rendu) -->
+    <script>
+        (function(){try{var t=localStorage.getItem("mc-theme");if(!t)t=matchMedia("(prefers-color-scheme: light)").matches?"light":"dark";document.documentElement.setAttribute("data-theme",t);}catch(e){document.documentElement.setAttribute("data-theme","dark");}})();
+    </script>
+    <link rel="stylesheet" href="theme.css">
+    <script src="theme.js" defer></script>
+    <style>
+        /* --- Styles spécifiques à la page Alertes --- */
+        .intro { font-size: 13px; color: var(--muted); line-height: 1.6; margin-bottom: 4px; }
+
+        /* Interrupteur OUI/NON réutilisé (méthodes + matrice d'alarmes) */
+        .switch { position: relative; display: inline-block; width: 42px; height: 22px; vertical-align: middle; }
+        .switch input { opacity: 0; width: 0; height: 0; }
+        .switch .slider {
+            position: absolute; inset: 0; cursor: pointer; border-radius: 999px;
+            background: var(--panel-2); border: 1px solid var(--border); transition: .18s;
+        }
+        .switch .slider::before {
+            content: ""; position: absolute; height: 16px; width: 16px; left: 2px; top: 2px;
+            background: var(--muted); border-radius: 50%; transition: .18s;
+        }
+        .switch input:checked + .slider { background: color-mix(in srgb, var(--ok) 32%, transparent); border-color: var(--ok); }
+        .switch input:checked + .slider::before { transform: translateX(20px); background: var(--ok); }
+        .switch input:focus-visible + .slider { box-shadow: var(--ring); }
+        .switch input:disabled + .slider { opacity: .38; cursor: not-allowed; }
+
+        /* Tableau des méthodes */
+        .methods-table td { vertical-align: middle; }
+        .methods-table .recipient-input { width: 100%; min-width: 220px; }
+        .methods-table tr.inactive td { color: var(--muted); }
+
+        /* Matrice des alarmes */
+        .alarms-table th.method-col, .alarms-table td.method-cell { text-align: center; width: 78px; }
+        .alarms-table td.method-cell.disabled { opacity: .45; }
+        .alarm-name { font-weight: 600; color: var(--text); }
+        .alarm-sub { font-size: 11px; color: var(--muted); margin-top: 2px; }
+
+        .yesno { font-size: 11px; color: var(--muted); margin-top: 4px; }
+        .col-actions { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+    </style>
+</head>
+<body>
+    <header class="topbar">
+        <div class="brand">
+            <span class="logo">🔔</span>
+            <h1>Alertes</h1>
+        </div>
+        <nav>
+            <a href="statistiques.html">📊 Statistiques</a>
+            <a href="database.html">🗄️ Base de données</a>
+            <a href="alerte.html" aria-current="page">🔔 Alertes</a>
+            <a href="api.html">🧪 Testeur d'API</a>
+        </nav>
+        <div class="actions">
+            <button id="btn-save" class="primary">💾 Enregistrer</button>
+            <button class="theme-toggle" type="button" title="Basculer clair / sombre" aria-label="Basculer le thème">
+                <span class="icon-moon">🌙</span><span class="icon-sun">☀️</span>
+            </button>
+        </div>
+    </header>
+
+    <!-- ============== MÉTHODES & DESTINATAIRES ============== -->
+    <div class="panel">
+        <h2>Méthodes de notification <span id="badge-state" class="badge b-muted">—</span></h2>
+        <p class="intro">
+            Configure ici le <b>destinataire</b> de chaque méthode de notification et active/désactive
+            globalement la méthode. Seul l'<b>e-mail</b> est opérationnel ; les autres méthodes
+            (MQTT, SMS, Slack) sont des emplacements réservés pour une évolution future.
+        </p>
+        <table class="methods-table">
+            <thead>
+                <tr>
+                    <th>Méthode</th>
+                    <th>État</th>
+                    <th>Activer</th>
+                    <th>Destinataire</th>
+                    <th>Test</th>
+                </tr>
+            </thead>
+            <tbody id="methods-body">
+                <tr><td colspan="5" style="color:var(--muted)">Chargement…</td></tr>
+            </tbody>
+        </table>
+        <div class="hint" style="margin-top:12px">
+            Le bouton <b>Tester</b> envoie un message de test via la méthode (vers le destinataire saisi),
+            sans rien enregistrer. Il n'est actif que pour une méthode disponible et activée.
+        </div>
+    </div>
+
+    <!-- ============== MATRICE DES ALARMES ============== -->
+    <div class="panel">
+        <h2>Alarmes à notifier</h2>
+        <p class="intro">
+            Pour chaque alarme détectée par le service de supervision, choisis les méthodes par
+            lesquelles une notification doit être envoyée. Une alarme est émise dès que l'évènement
+            correspondant est enregistré (les tâches de relevé détectent le démarrage/arrêt de Mirth,
+            l'arrêt/redémarrage du checker et le démarrage du système).
+        </p>
+        <table class="alarms-table">
+            <thead>
+                <tr id="alarms-head">
+                    <th>Alarme</th>
+                    <th>Gravité</th>
+                    <!-- colonnes de méthodes injectées dynamiquement -->
+                </tr>
+            </thead>
+            <tbody id="alarms-body">
+                <tr><td colspan="6" style="color:var(--muted)">Chargement…</td></tr>
+            </tbody>
+        </table>
+        <div class="hint" style="margin-top:12px">
+            Le bouton <b>Tester</b> de chaque ligne déclenche l'envoi <b>multiple</b> de l'alarme via les
+            méthodes actuellement cochées (état affiché, même non enregistré). Il <b>n'enregistre rien</b>
+            en base — aucun évènement ni relevé n'est créé (utile pour le test et le développement).
+        </div>
+    </div>
+
+    <!-- ============== JOURNAL ============== -->
+    <div class="panel">
+        <h2>Journal des opérations</h2>
+        <div class="console" id="console"><span class="log-info">En attente d'une opération…</span></div>
+    </div>
+
+    <footer>
+        <span id="foot-status"><span class="dot pulse" style="background:var(--ok)"></span>Connecté</span>
+        — Configuration des notifications d'alarmes
+    </footer>
+
+<script>
+const API = "";              // même origine que la page
+const $ = id => document.getElementById(id);
+
+let CATALOG = { alarms: [], methods: [] };   // descripteurs (catalogue serveur)
+
+// ----------------------------------------------------------------------
+// Utilitaires
+// ----------------------------------------------------------------------
+function log(msg, kind = "info") {
+    const c = $("console");
+    if (c.dataset.fresh !== "1") { c.innerHTML = ""; c.dataset.fresh = "1"; }
+    const time = new Date().toLocaleTimeString("fr-FR");
+    const line = document.createElement("div");
+    line.className = "log-line";
+    line.innerHTML = `<span class="log-time">${time}</span> <span class="log-${kind}"></span>`;
+    line.querySelector("span.log-" + kind).textContent = msg;
+    c.appendChild(line);
+    c.scrollTop = c.scrollHeight;
+}
+
+function setFoot(ok, msg) {
+    $("foot-status").innerHTML = ok
+        ? '<span class="dot pulse" style="background:var(--ok)"></span>Connecté'
+        : '<span class="dot" style="background:var(--err)"></span>Hors ligne : ' + msg;
+}
+
+// Désactive les boutons pendant une opération, puis ne réactive QUE ceux qu'on a
+// désactivés (préserve l'état « inactif » propre des boutons de test indisponibles).
+function busy(on) {
+    document.querySelectorAll("button").forEach(b => {
+        if (b.classList.contains("theme-toggle")) return;
+        if (on) {
+            if (!b.disabled) { b.dataset.busied = "1"; b.disabled = true; }
+        } else if (b.dataset.busied === "1") {
+            b.disabled = false;
+            delete b.dataset.busied;
+        }
+    });
+}
+
+async function postJson(url, body) {
+    const r = await fetch(API + url, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body || {}),
+    });
+    const data = await r.json().catch(() => ({}));
+    if (!r.ok) throw new Error(data.error || ("HTTP " + r.status));
+    return data;
+}
+
+const SEVERITY = {
+    critical: { cls: "b-err",   label: "Critique" },
+    warning:  { cls: "b-warn",  label: "Avertissement" },
+    info:     { cls: "b-muted", label: "Information" },
+};
+
+// Construit un interrupteur OUI/NON ; `dataset` permet de le retrouver à la sauvegarde.
+function makeSwitch({ checked, disabled, data }) {
+    const wrap = document.createElement("label");
+    wrap.className = "switch";
+    const input = document.createElement("input");
+    input.type = "checkbox";
+    input.checked = !!checked;
+    input.disabled = !!disabled;
+    Object.entries(data || {}).forEach(([k, v]) => input.dataset[k] = v);
+    const slider = document.createElement("span");
+    slider.className = "slider";
+    wrap.appendChild(input);
+    wrap.appendChild(slider);
+    return { wrap, input };
+}
+
+// ----------------------------------------------------------------------
+// Chargement & rendu de la configuration
+// ----------------------------------------------------------------------
+async function loadConfig() {
+    try {
+        const r = await fetch(API + "/api/alerts/config");
+        if (!r.ok) throw new Error("HTTP " + r.status);
+        const d = await r.json();
+        CATALOG = { alarms: d.alarms || [], methods: d.methods || [] };
+        renderMethods(d.methods || [], (d.config && d.config.methods) || {});
+        renderAlarms(d.alarms || [], d.methods || [], (d.config && d.config.rules) || {});
+        $("badge-state").className = "badge b-ok";
+        $("badge-state").textContent = "Chargée";
+        setFoot(true);
+    } catch (e) {
+        setFoot(false, e.message);
+        $("badge-state").className = "badge b-err";
+        $("badge-state").textContent = "Erreur";
+        log("✗ Chargement de la configuration : " + e.message, "err");
+    }
+}
+
+function renderMethods(methods, cfg) {
+    const tb = $("methods-body");
+    tb.innerHTML = "";
+    methods.forEach(m => {
+        const stored = cfg[m.method] || {};
+        // E-mail actif par défaut ; méthodes futures désactivées.
+        const enabled = stored.enabled !== undefined ? stored.enabled : !!m.active;
+        const recipient = stored.recipient || "";
+
+        const tr = document.createElement("tr");
+        tr.className = m.active ? "" : "inactive";
+
+        const tdName = document.createElement("td");
+        tdName.innerHTML = `<b>${m.label}</b>`;
+        tr.appendChild(tdName);
+
+        const tdState = document.createElement("td");
+        tdState.innerHTML = m.active
+            ? '<span class="badge b-ok">Actif</span>'
+            : '<span class="badge b-muted">À venir</span>';
+        tr.appendChild(tdState);
+
+        const tdToggle = document.createElement("td");
+        const sw = makeSwitch({ checked: enabled, disabled: !m.active,
+                                data: { role: "method", method: m.method } });
+        tdToggle.appendChild(sw.wrap);
+        tr.appendChild(tdToggle);
+
+        const tdRec = document.createElement("td");
+        const input = document.createElement("input");
+        input.type = "text";
+        input.className = "recipient-input";
+        input.placeholder = m.placeholder || "";
+        input.value = recipient;
+        input.disabled = !m.active;
+        input.dataset.role = "recipient";
+        input.dataset.method = m.method;
+        tdRec.appendChild(input);
+        tr.appendChild(tdRec);
+
+        // Bouton de test de la méthode : actif seulement si la méthode est
+        // disponible (implémentée) ET activée par l'interrupteur (état courant).
+        const tdTest = document.createElement("td");
+        const btn = document.createElement("button");
+        btn.className = "small";
+        btn.textContent = "✉ Tester";
+        btn.disabled = !(m.active && sw.input.checked);
+        btn.addEventListener("click", () => testMethod(m.method, input.value.trim()));
+        sw.input.addEventListener("change", () => {
+            btn.disabled = !(m.active && sw.input.checked);
+        });
+        tdTest.appendChild(btn);
+        tr.appendChild(tdTest);
+
+        tb.appendChild(tr);
+    });
+}
+
+function renderAlarms(alarms, methods, rules) {
+    // En-tête : une colonne par méthode, puis une colonne « Test ».
+    const head = $("alarms-head");
+    head.querySelectorAll(".method-col, .test-col").forEach(n => n.remove());
+    methods.forEach(m => {
+        const th = document.createElement("th");
+        th.className = "method-col";
+        th.innerHTML = m.active ? m.label : `${m.label}<div class="yesno">à venir</div>`;
+        head.appendChild(th);
+    });
+    const thTest = document.createElement("th");
+    thTest.className = "test-col";
+    thTest.textContent = "Test";
+    head.appendChild(thTest);
+
+    const tb = $("alarms-body");
+    tb.innerHTML = "";
+    alarms.forEach(a => {
+        const tr = document.createElement("tr");
+
+        const tdName = document.createElement("td");
+        tdName.innerHTML = `<div class="alarm-name">${a.title}</div>` +
+            `<div class="alarm-sub">code : ${a.code} · catégorie : ${a.category}</div>`;
+        tr.appendChild(tdName);
+
+        const sev = SEVERITY[a.severity] || SEVERITY.info;
+        const tdSev = document.createElement("td");
+        tdSev.innerHTML = `<span class="badge ${sev.cls}">${sev.label}</span>`;
+        tr.appendChild(tdSev);
+
+        methods.forEach(m => {
+            const td = document.createElement("td");
+            td.className = "method-cell" + (m.active ? "" : " disabled");
+            const stored = (rules[a.code] || {})[m.method];
+            // Valeur par défaut propre à chaque méthode (default_email / default_mqtt…).
+            const def = !!a["default_" + m.method];
+            const checked = stored !== undefined ? stored : def;
+            const sw = makeSwitch({ checked, disabled: !m.active,
+                                    data: { role: "rule", alarm: a.code, method: m.method } });
+            td.appendChild(sw.wrap);
+            tr.appendChild(td);
+        });
+
+        // Bouton de test de l'alarme (envoi multiple, sans enregistrement en base).
+        const tdTest = document.createElement("td");
+        tdTest.className = "test-col";
+        const btn = document.createElement("button");
+        btn.className = "small";
+        btn.textContent = "▶ Tester";
+        btn.title = "Envoyer l'alarme via les méthodes cochées (sans enregistrement)";
+        btn.addEventListener("click", () => testAlarm(a.code, a.title));
+        tdTest.appendChild(btn);
+        tr.appendChild(tdTest);
+
+        tb.appendChild(tr);
+    });
+}
+
+// ----------------------------------------------------------------------
+// Collecte de l'état de l'IHM → payload de sauvegarde
+// ----------------------------------------------------------------------
+function collectPayload() {
+    const methods = {};
+    CATALOG.methods.forEach(m => methods[m.method] = { enabled: false, recipient: "" });
+
+    document.querySelectorAll('input[data-role="method"]').forEach(i => {
+        methods[i.dataset.method].enabled = i.checked;
+    });
+    document.querySelectorAll('input[data-role="recipient"]').forEach(i => {
+        methods[i.dataset.method].recipient = i.value.trim();
+    });
+
+    const rules = {};
+    document.querySelectorAll('input[data-role="rule"]').forEach(i => {
+        (rules[i.dataset.alarm] = rules[i.dataset.alarm] || {})[i.dataset.method] = i.checked;
+    });
+
+    return { methods, rules };
+}
+
+async function save() {
+    busy(true);
+    log("Enregistrement de la configuration…", "info");
+    try {
+        const payload = collectPayload();
+        await postJson("/api/alerts/save", payload);
+        log("✓ Configuration enregistrée.", "ok");
+        await loadConfig();
+    } catch (e) {
+        log("✗ Enregistrement : " + e.message, "err");
+    } finally { busy(false); }
+}
+
+// Journalise les résultats d'envoi renvoyés par les endpoints de test.
+function logResults(results) {
+    (results || []).forEach(r => {
+        const dest = r.dest || "—";
+        if (r.ok) log(`✓ ${r.method} → ${dest} : envoyé.`, "ok");
+        else log(`✗ ${r.method} → ${dest} : ${r.error || "échec"}.`, "err");
+    });
+}
+
+// Test d'une MÉTHODE (bouton du 1er tableau) : envoi via cette seule méthode.
+async function testMethod(method, recipient) {
+    if (method === "email" && !recipient) {
+        log("✗ Saisis au moins une adresse e-mail à tester.", "err"); return;
+    }
+    busy(true);
+    log(`Test de la méthode « ${method} »…`, "info");
+    try {
+        const d = await postJson("/api/alerts/test", { method, recipient });
+        logResults(d.results);
+        if (!d.results || !d.results.length) log("✓ Test traité.", "ok");
+    } catch (e) {
+        log("✗ Test : " + e.message, "err");
+    } finally { busy(false); }
+}
+
+// Test d'une ALARME (bouton du 2e tableau) : envoi multiple via les méthodes
+// cochées dans l'état COURANT de la page (envoyé tel quel, sans enregistrement).
+async function testAlarm(code, title) {
+    busy(true);
+    log(`Test de l'alarme « ${title} » (${code})…`, "info");
+    try {
+        const { methods, rules } = collectPayload();
+        const d = await postJson("/api/alerts/test-alarm", { code, methods, rules });
+        logResults(d.results);
+        if (d.error) log("⚠ " + d.error, d.ok ? "info" : "err");
+        else if (!d.results || !d.results.length) log("✓ Test traité.", "ok");
+    } catch (e) {
+        log("✗ Test : " + e.message, "err");
+    } finally { busy(false); }
+}
+
+// ----------------------------------------------------------------------
+// Branchements
+// ----------------------------------------------------------------------
+$("btn-save").addEventListener("click", save);
+
+loadConfig();
+</script>
+</body>
+</html>

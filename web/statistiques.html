@@ -131,6 +131,7 @@
         <nav>
             <a href="statistiques.html" aria-current="page">📊 Statistiques</a>
             <a href="database.html">🗄️ Base de données</a>
+            <a href="alerte.html">🔔 Alertes</a>
             <a href="api.html">🧪 Testeur d'API</a>
         </nav>
         <div class="controls">
@@ -255,7 +256,7 @@
 
     <div class="chart-panel" id="throughput-panel">
         <div class="legend-events" style="display:flex;align-items:center;gap:12px;flex-wrap:wrap;justify-content:space-between">
-            <span>📈 Activité Mirth — débit déduit des compteurs cumulatifs (messages/min entre deux relevés). Une remise à zéro des compteurs (redémarrage Mirth) est ignorée (débit plancher 0).</span>
+            <span>📈 Activité Mirth — débit déduit des compteurs cumulatifs (messages/min entre deux relevés).</span>
             <label style="display:flex;align-items:center;gap:6px;white-space:nowrap">Portée :
                 <select id="throughput-scope" title="Choisir la portée du graphe d'activité (global, un canal ou un connecteur)">
                     <option value="">Global (tous canaux)</option>
@@ -312,7 +313,7 @@
 
     <div class="chart-panel">
         <div class="legend-events">
-            <span>Suivi temporel du processus Mirth (tag <code>mirth</code>) — les courbes restent à 0 lorsque le processus est arrêté ; les barres verticales signalent les évènements (start/stop, alarmes, …).</span>
+            <span>Suivi temporel du processus Mirth (tag <code>mirth</code>).</span>
         </div>
         <div class="chart-wrap">
             <canvas id="mirthChart"></canvas>
@@ -347,11 +348,7 @@
 
     <div class="chart-panel">
         <div class="legend-events">
-            <span><span class="vbar" style="background:#ef4444"></span> Démarrage système</span>
-            <span><span class="vbar" style="background:#22c55e"></span> Start/stop checker</span>
-            <span><span class="vbar" style="background:#a78bfa"></span> Start/stop Mirth</span>
-            <span><span class="vbar" style="background:#f59e0b"></span> Alarme / autre</span>
-            <span>Barres = évènements superposés (<code>/api/events</code>). La courbe se brise sur les valeurs nulles.</span>
+            <span>Activités système</span>
         </div>
         <div class="chart-wrap">
             <canvas id="chart"></canvas>
@@ -361,7 +358,7 @@
 
     <footer>
         <span id="foot-status"><span class="dot pulse" style="background:var(--ok)"></span>Connecté</span>
-        — Données relevées toutes les 60 s par <code>checker_service.py</code>
+        — Données relevées toutes les 60 s
     </footer>
 
 <script>

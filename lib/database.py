@@ -259,6 +259,39 @@ def init_db(db_path=DEFAULT_DB_PATH):
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_events_timestamp ON events(timestamp)"
         )
+
+        # Configuration des ALERTES (notifications sortantes). Indépendante des
+        # relevés : ce sont des réglages persistants pilotés par la page
+        # `alerte.html`, lus par checker_service au moment où une alarme survient.
+        #
+        #  - `alert_methods` : une ligne par canal de notification (email, mqtt,
+        #    sms, slack, ...). `enabled` = méthode globalement active ; `recipient`
+        #    = cible (ex. adresses e-mail séparées par des virgules) ; `config` =
+        #    réglages additionnels au format JSON (réservé aux méthodes futures).
+        #  - `alert_rules` : matrice OUI/NON (une ligne par couple alarme×méthode)
+        #    indiquant si une alarme donnée doit être notifiée via une méthode.
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS alert_methods (
+                method      TEXT    PRIMARY KEY,
+                enabled     INTEGER NOT NULL DEFAULT 0,
+                recipient   TEXT,
+                config      TEXT,
+                updated_at  TEXT
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS alert_rules (
+                id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                alarm_code  TEXT    NOT NULL,
+                method      TEXT    NOT NULL,
+                enabled     INTEGER NOT NULL DEFAULT 0,
+                UNIQUE(alarm_code, method)
+            )
+            """
+        )
         conn.commit()
     finally:
         conn.close()
@@ -868,6 +901,96 @@ def get_events(hours=24, date_deb=None, date_fin=None, category=None, limit=2000
             params,
         )
         return [dict(row) for row in cur.fetchall()]
+    finally:
+        conn.close()
+
+
+# ==========================================================================
+# CONFIGURATION DES ALERTES (tables `alert_methods` / `alert_rules`)
+# Réglages persistants de la notification sortante : quelles alarmes notifier,
+# par quelle(s) méthode(s), et vers quel destinataire. Lus par checker_service
+# au moment où une alarme survient ; écrits par la page `alerte.html`.
+# ==========================================================================
+def get_alert_methods(db_path=DEFAULT_DB_PATH):
+    """Retourne la configuration des méthodes de notification.
+
+    Returns:
+        dict[str, dict]: {method: {"enabled": bool, "recipient": str|None,
+        "config": dict}}. `config` est désérialisé depuis sa colonne JSON.
+    """
+    conn = _connect(db_path)
+    try:
+        out = {}
+        for r in conn.execute("SELECT * FROM alert_methods"):
+            try:
+                cfg = json.loads(r["config"]) if r["config"] else {}
+            except (ValueError, TypeError):
+                cfg = {}
+            out[r["method"]] = {
+                "enabled": bool(r["enabled"]),
+                "recipient": r["recipient"],
+                "config": cfg,
+            }
+        return out
+    finally:
+        conn.close()
+
+
+def get_alert_rules(db_path=DEFAULT_DB_PATH):
+    """Retourne la matrice alarme×méthode sous forme {alarm_code: {method: bool}}."""
+    conn = _connect(db_path)
+    try:
+        out = {}
+        for r in conn.execute("SELECT alarm_code, method, enabled FROM alert_rules"):
+            out.setdefault(r["alarm_code"], {})[r["method"]] = bool(r["enabled"])
+        return out
+    finally:
+        conn.close()
+
+
+def get_alert_config(db_path=DEFAULT_DB_PATH):
+    """Vue complète de la configuration des alertes : {methods, rules}."""
+    return {"methods": get_alert_methods(db_path=db_path),
+            "rules": get_alert_rules(db_path=db_path)}
+
+
+def save_alert_config(methods=None, rules=None, db_path=DEFAULT_DB_PATH):
+    """Enregistre (remplace) la configuration des alertes en une transaction.
+
+    Args:
+        methods (dict|None): {method: {"enabled": bool, "recipient": str,
+            "config": dict}}. Chaque méthode fournie est insérée/mise à jour
+            (UPSERT). Les méthodes non fournies sont laissées intactes.
+        rules (dict|None): {alarm_code: {method: bool}}. Chaque couple fourni est
+            inséré/mis à jour. Les couples non fournis sont laissés intacts.
+    """
+    now = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    conn = _connect(db_path)
+    try:
+        # SELECT-puis-INSERT/UPDATE plutôt qu'un UPSERT `ON CONFLICT`, par souci de
+        # compatibilité avec les SQLite embarquées anciennes (cf. _get_or_create_entity).
+        for method, m in (methods or {}).items():
+            enabled = 1 if m.get("enabled") else 0
+            cfg = json.dumps(m.get("config") or {})
+            cur = conn.execute(
+                "UPDATE alert_methods SET enabled=?, recipient=?, config=?, updated_at=? "
+                "WHERE method=?", (enabled, m.get("recipient"), cfg, now, method))
+            if cur.rowcount == 0:
+                conn.execute(
+                    "INSERT INTO alert_methods (method, enabled, recipient, config, updated_at) "
+                    "VALUES (?, ?, ?, ?, ?)",
+                    (method, enabled, m.get("recipient"), cfg, now))
+        for alarm_code, by_method in (rules or {}).items():
+            for method, enabled in by_method.items():
+                val = 1 if enabled else 0
+                cur = conn.execute(
+                    "UPDATE alert_rules SET enabled=? WHERE alarm_code=? AND method=?",
+                    (val, alarm_code, method))
+                if cur.rowcount == 0:
+                    conn.execute(
+                        "INSERT INTO alert_rules (alarm_code, method, enabled) VALUES (?, ?, ?)",
+                        (alarm_code, method, val))
+        conn.commit()
     finally:
         conn.close()
 
