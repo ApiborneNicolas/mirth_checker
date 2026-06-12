@@ -72,7 +72,8 @@ REM ---- Compilation ----
 echo.
 echo [INFO] Compilation des scripts...
 %PYINSTALLER%  --onefile system_state.py
-%PYINSTALLER%  --onefile --add-data ".mirth_config.py;."mirth_api.py
+%PYINSTALLER%  --onefile --add-data ".mirth_config.py;." mirth_api.py
+%PYINSTALLER%  --onefile --add-data ".mirth_config.py;." mirth_simulator.py
 %PYINSTALLER%  --onefile --add-data ".smtp_config.py;." quickmail.py
 %PYINSTALLER%  --onefile --add-data ".smtp_config.py;." mirth_logs_parser.py
 %PYINSTALLER%  --onefile --add-data ".smtp_config.py;." --add-data ".mirth_config.py;." checker_service.py
@@ -81,6 +82,7 @@ echo [OK] Compilation terminee !
 
 REM ---- Copie des fichiers ----
 REM copy .\dist\*.exe .\*.exe
+copy .\dist\mirth_simulator.exe .\dist\mcservice.exe
 
 pause
 
