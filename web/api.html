@@ -226,6 +226,13 @@ const ENDPOINTS = [
     { id: "/api/mirth/errors", method: "GET", cat: "Mirth", label: "Mirth — Canaux en erreur",
       desc: "Canaux présentant des erreurs (statistique ERROR > 0) ou un état d'erreur.",
       params: [ { name: "timeout", kind: "number", label: "Timeout (s)", default: "8" } ] },
+    { id: "/api/mirth/messages", method: "GET", cat: "Mirth", label: "Mirth — Messages en erreur",
+      desc: "Liste des messages en erreur d'un canal (ou de tous les canaux en erreur si aucun canal n'est précisé). Chaque message contient son horodatage, le nombre de tentatives (retry), la catégorie d'erreur, le texte d'erreur intégral et le contenu brut.",
+      params: [
+          { name: "channel", kind: "text", label: "ID du canal (channelId)", placeholder: "(tous les canaux en erreur)" },
+          { name: "limit", kind: "number", label: "Nb max de messages par canal", default: "50" },
+          { name: "timeout", kind: "number", label: "Timeout (s)", default: "8" }
+      ] },
     { id: "/api/getmirthinfo", method: "GET", cat: "Mirth", label: "Infos Mirth (multi-format)",
       desc: "Infos Mirth à la demande (json/text/html), une seule interrogation du serveur alimente toutes les sections.",
       params: [

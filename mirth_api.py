@@ -36,6 +36,7 @@ import os
 import sys
 import ssl
 import json
+import datetime
 import importlib.util
 import urllib.parse
 import urllib.request
@@ -241,6 +242,27 @@ class MirthClient:
                             c[k] = src[k]
         return channels
 
+    def get_messages_raw(self, channel_id, status="ERROR", limit=50, offset=0,
+                         include_content=True):
+        """Réponse brute de /channels/{id}/messages (recherche de messages), ou None.
+
+        `status` peut être une chaîne (ex. "ERROR") ou une liste de statuts ; chaque
+        statut devient un paramètre `status` répété, comme l'attend l'API Mirth. Le
+        contenu intégral des messages est inclus par défaut (`includeContent=true`).
+        """
+        params = [("offset", offset), ("limit", limit),
+                  ("includeContent", "true" if include_content else "false")]
+        for st in _as_list(status):
+            if st:
+                params.append(("status", str(st).upper()))
+        query = urllib.parse.urlencode(params)
+        path = "/channels/%s/messages?%s" % (
+            urllib.parse.quote(str(channel_id), safe=""), query)
+        try:
+            return self._get_json(path)
+        except Exception:
+            return None
+
 
 # --------------------------------------------------------------------------
 # PARSING DÉFENSIF DES STATUTS DE CANAUX (format JSON variable selon version)
@@ -438,6 +460,139 @@ def compute_totals(channels):
 
 
 # --------------------------------------------------------------------------
+# PARSING DÉFENSIF DES MESSAGES EN ERREUR (/channels/{id}/messages)
+# --------------------------------------------------------------------------
+# Champs d'erreur portés par un message de connecteur, avec leur libellé lisible.
+_ERROR_FIELDS = (
+    ("processingError", "Traitement"),
+    ("postProcessorError", "Post-traitement"),
+    ("responseError", "Réponse"),
+)
+
+
+def _fmt_mirth_date(value):
+    """Convertit un horodatage Mirth en 'YYYY-MM-DD HH:MM:SS'.
+
+    Mirth sérialise les dates en `{"time": <epoch_ms>, "timezone": ...}` ; on
+    tolère aussi une valeur déjà textuelle (renvoyée telle quelle) ou nulle.
+    """
+    if value is None:
+        return None
+    if isinstance(value, dict):
+        t = value.get("time")
+        if t is None:
+            return None
+        try:
+            return datetime.datetime.fromtimestamp(
+                int(t) / 1000.0).strftime("%Y-%m-%d %H:%M:%S")
+        except (TypeError, ValueError, OSError):
+            return str(t)
+    return str(value)
+
+
+def _content_text(connector, *keys):
+    """Extrait le contenu textuel d'un message de connecteur.
+
+    Les blocs `raw`/`encoded`/`sent` sont des objets MessageContent dont le texte
+    est sous la clé `content` ; on renvoie le premier non vide rencontré.
+    """
+    for k in keys:
+        c = connector.get(k)
+        if isinstance(c, dict):
+            txt = c.get("content")
+            if txt:
+                return txt
+        elif isinstance(c, str) and c:
+            return c
+    return None
+
+
+def _iter_connector_messages(message):
+    """Itère les messages de connecteur (source + destinations) d'un message.
+
+    `connectorMessages` est une Map<Integer, ConnectorMessage> sérialisée de façon
+    variable selon la version (entry+objet, entry+tableau, ou dict simple) ; on
+    renvoie une liste de dicts ConnectorMessage.
+    """
+    cm = message.get("connectorMessages")
+    if isinstance(cm, dict):
+        entries = _as_list(cm.get("entry")) if "entry" in cm else list(cm.values())
+    elif isinstance(cm, list):
+        entries = cm
+    else:
+        return []
+
+    out = []
+    for e in entries:
+        conn = None
+        if isinstance(e, dict):
+            conn = e.get("connectorMessage")
+            if conn is None:
+                # entry = {clé: ConnectorMessage} : on prend la 1re valeur exploitable.
+                for v in e.values():
+                    if isinstance(v, dict) and ("status" in v or "connectorName" in v):
+                        conn = v
+                        break
+                if conn is None and ("status" in e or "connectorName" in e):
+                    conn = e   # l'entrée est elle-même le ConnectorMessage
+        elif isinstance(e, (list, tuple)) and len(e) >= 2 and isinstance(e[1], dict):
+            conn = e[1]
+        if isinstance(conn, dict):
+            out.append(conn)
+    return out
+
+
+def _parse_messages(data, channel_id=None, channel_name=None):
+    """Normalise /channels/{id}/messages en liste de messages de connecteur en erreur.
+
+    Renvoie une liste de dicts {channel_id, channel_name, message_id, connector,
+    meta_data_id, status, received_date, send_attempts, error_code, category,
+    error, content}. Ne conserve que les connecteurs en statut ERROR ou portant un
+    texte d'erreur.
+    """
+    if isinstance(data, dict):
+        container = data.get("list", data)
+        if isinstance(container, dict):
+            messages = _as_list(container.get("message"))
+        else:
+            messages = _as_list(container)
+    else:
+        messages = _as_list(data)
+
+    items = []
+    for m in messages:
+        if not isinstance(m, dict):
+            continue
+        msg_id = m.get("messageId")
+        msg_date = _fmt_mirth_date(m.get("receivedDate"))
+        for conn in _iter_connector_messages(m):
+            status = (conn.get("status") or "").upper()
+            errors, cats = [], []
+            for field, label in _ERROR_FIELDS:
+                txt = conn.get(field)
+                if txt:
+                    errors.append(txt if isinstance(txt, str) else str(txt))
+                    cats.append(label)
+            if status != "ERROR" and not errors:
+                continue
+            items.append({
+                "channel_id": channel_id,
+                "channel_name": channel_name,
+                "message_id": msg_id,
+                "connector": conn.get("connectorName") or "-",
+                "meta_data_id": conn.get("metaDataId"),
+                "status": conn.get("status") or status or "ERROR",
+                "received_date": _fmt_mirth_date(conn.get("receivedDate")) or msg_date,
+                "send_attempts": _coerce_int(conn.get("sendAttempts")),
+                "error_code": _coerce_int(conn.get("errorCode")),
+                "category": ", ".join(cats) if cats else (conn.get("connectorName") or "-"),
+                "error": "\n\n".join(errors) if errors else None,
+                "content": _content_text(conn, "raw", "encoded", "sent"),
+            })
+    return items
+
+
+# --------------------------------------------------------------------------
 # POINTS D'ENTRÉE HAUT NIVEAU (ne lèvent jamais)
 # --------------------------------------------------------------------------
 def _new_result(extra=None):
@@ -585,6 +740,57 @@ def get_errors(timeout=8):
     result["channels"] = faulty
     result["error_count"] = len(faulty)
     result["total_errors"] = sum(c["error"] for c in faulty if isinstance(c["error"], int))
+    result["reachable"] = True
+    return result
+
+
+def get_error_messages(channel_id=None, limit=50, timeout=8):
+    """Messages en erreur d'un canal (ou de tous les canaux en erreur).
+
+    Si `channel_id` est fourni, renvoie les messages en erreur de ce seul canal ;
+    sinon, parcourt tous les canaux ayant au moins une erreur et agrège leurs
+    messages. Chaque message renvoyé porte son `channel_id`/`channel_name`, ce qui
+    permet d'afficher une liste unifiée côté client.
+
+    Ne lève jamais : en cas d'échec, renvoie {"reachable": False, "error": ...}.
+    Champs : messages (liste), count (total), channels (récapitulatif par canal),
+    channel_name (si un canal unique a été demandé).
+    """
+    result = _new_result({"channel_id": channel_id, "channel_name": None,
+                          "messages": [], "count": 0, "channels": []})
+
+    def _fetch(client):
+        channels = client.get_channels()
+        names = {c.get("channel_id"): c.get("name") for c in channels}
+        if channel_id:
+            targets = [(channel_id, names.get(channel_id))]
+        else:
+            # Tous les canaux ayant au moins une erreur comptabilisée.
+            targets = [(c.get("channel_id"), c.get("name")) for c in channels
+                       if isinstance(c.get("error"), int) and c["error"] > 0]
+
+        all_items, per_channel = [], []
+        for cid, cname in targets:
+            items = _parse_messages(client.get_messages_raw(cid, status="ERROR",
+                                                            limit=limit),
+                                    channel_id=cid, channel_name=cname)
+            per_channel.append({"channel_id": cid, "name": cname,
+                                "count": len(items)})
+            all_items.extend(items)
+        return all_items, per_channel, (names.get(channel_id) if channel_id else None)
+
+    data, error = _with_client(_fetch, timeout=timeout)
+    if data is None:
+        result["error"] = error
+        return result
+
+    all_items, per_channel, cname = data
+    # Tri décroissant par date d'erreur (les plus récentes en tête).
+    all_items.sort(key=lambda x: x.get("received_date") or "", reverse=True)
+    result["messages"] = all_items
+    result["count"] = len(all_items)
+    result["channels"] = per_channel
+    result["channel_name"] = cname
     result["reachable"] = True
     return result
 

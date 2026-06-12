@@ -925,6 +925,27 @@ def api_mirth_errors(req):
     return mirth_api.get_errors(timeout=_mirth_timeout(req))
 
 
+def api_mirth_messages(req):
+    """Messages en erreur d'un canal Mirth (ou de tous les canaux en erreur).
+
+    Paramètres :
+      ?channel=<channel_id>   (absent => tous les canaux ayant des erreurs)
+      &limit=50               (nombre max de messages remontés par canal)
+      &timeout=8              (délai réseau en secondes)
+
+    Chaque message renvoyé porte son canal d'origine, son horodatage, le nombre de
+    tentatives d'envoi (retry), la catégorie d'erreur, le texte d'erreur intégral
+    et le contenu brut du message.
+    """
+    channel_id = (req.get("channel") or "").strip() or None
+    try:
+        limit = int(req.get("limit", 50))
+    except ValueError:
+        limit = 50
+    return mirth_api.get_error_messages(channel_id=channel_id, limit=limit,
+                                        timeout=_mirth_timeout(req))
+
+
 def api_mirth_process(req):
     """Instantané live du processus Mirth (CPU / mémoire / sockets)."""
     p = probe_mirth_process()
@@ -1115,6 +1136,7 @@ def build_router(tasks, started_at):
     router.get("/api/mirth/stats", api_mirth_stats)
     router.get("/api/mirth/server", api_mirth_server)
     router.get("/api/mirth/errors", api_mirth_errors)
+    router.get("/api/mirth/messages", api_mirth_messages)
     router.get("/api/mirth/process", api_mirth_process)
     router.get("/api/getmirthinfo", api_getmirthinfo)
 

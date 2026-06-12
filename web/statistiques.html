@@ -35,6 +35,50 @@
         .modal .modal-actions { display: flex; gap: 8px; margin-top: 12px; flex-wrap: wrap; }
         .switch-row { display: flex; align-items: center; gap: 9px; font-size: 14px; color: var(--text); }
         .switch-row input { width: 16px; height: 16px; cursor: pointer; }
+
+        /* Compteur d'erreurs cliquable dans la table des canaux */
+        .err-link {
+            background: none; border: none; padding: 2px 8px; cursor: pointer;
+            font: inherit; font-weight: 700; color: var(--err); border-radius: 6px;
+            text-decoration: underline; text-underline-offset: 2px;
+        }
+        .err-link:hover { background: color-mix(in srgb, var(--err) 16%, transparent); }
+        .totals-row .err-link { color: var(--err); }
+
+        /* Modale « Messages en erreur » : plus large, liste d'items dépliables */
+        .modal.wide { width: min(960px, calc(100vw - 32px)); }
+        #errors-modal .modal-body { padding: 0; }
+        .errors-toolbar {
+            display: flex; align-items: center; gap: 12px; flex-wrap: wrap;
+            padding: 12px 20px; border-bottom: 1px solid var(--border);
+            font-size: 13px; color: var(--muted);
+        }
+        .errors-list { max-height: calc(100vh - 200px); overflow: auto; padding: 14px 20px; }
+        .err-item { border: 1px solid var(--border); border-radius: var(--radius-sm); margin-bottom: 12px; overflow: hidden; }
+        .err-item-head {
+            display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+            padding: 10px 14px; background: var(--panel-2); cursor: pointer;
+        }
+        .err-item-head .err-meta { font-size: 12px; color: var(--muted); display: inline-flex; gap: 5px; align-items: center; }
+        .err-item-head .err-meta b { color: var(--text); font-weight: 600; }
+        .err-item-head .err-chan { font-weight: 650; color: var(--text); margin-right: auto; }
+        .err-item-body { display: none; padding: 12px 14px; border-top: 1px solid var(--border); }
+        .err-item.open .err-item-body { display: block; }
+        .err-item.open .err-caret { transform: rotate(90deg); }
+        .err-caret { transition: transform .15s ease; color: var(--muted); }
+        .err-block-label {
+            display: flex; align-items: center; justify-content: space-between;
+            font-size: 12px; text-transform: uppercase; letter-spacing: .05em;
+            color: var(--muted); font-weight: 650; margin: 10px 0 5px;
+        }
+        .err-block-label:first-child { margin-top: 0; }
+        .copy-btn { font-size: 11px; padding: 3px 10px; }
+        .err-pre {
+            margin: 0; background: var(--code-bg); border: 1px solid var(--border);
+            border-radius: var(--radius-sm); padding: 10px 12px; font-family: var(--mono);
+            font-size: 12px; line-height: 1.5; color: #7dd3fc; max-height: 240px;
+            overflow: auto; white-space: pre-wrap; word-break: break-word;
+        }
     </style>
 </head>
 <body>
@@ -102,6 +146,23 @@
                     <div class="sec-label">Rafraîchissement</div>
                     <label class="switch-row"><input type="checkbox" id="autorefresh" checked> Auto-rafraîchir (toutes les 30 s)</label>
                 </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- ================= MODALE : MESSAGES EN ERREUR D'UN CANAL ================= -->
+    <div class="modal-overlay" id="errors-modal">
+        <div class="modal wide" role="dialog" aria-modal="true" aria-labelledby="errors-modal-title">
+            <div class="modal-head">
+                <h2 id="errors-modal-title">⚠ Messages en erreur</h2>
+                <button class="modal-close" id="closeErrors" title="Fermer">✕</button>
+            </div>
+            <div class="modal-body">
+                <div class="errors-toolbar">
+                    <span id="errors-summary">Chargement…</span>
+                    <button id="errors-reload" style="margin-left:auto" title="Recharger">↻ Recharger</button>
+                </div>
+                <div class="errors-list" id="errors-list"></div>
             </div>
         </div>
     </div>
@@ -753,6 +814,20 @@ function renderChannels(channels, error, totals) {
         note.textContent = "";
         return;
     }
+    // Cellule « Erreurs » : cliquable (ouvre la liste des messages en erreur)
+    // dès lors que le compteur est strictement positif.
+    const escAttr = s => String(s).replace(/"/g, "&quot;");
+    const errCell = (count, channelId, channelName, bold) => {
+        if (typeof count === "number" && count > 0) {
+            const inner = bold ? `<b>${count}</b>` : count;
+            const cid = channelId ? ` data-channel="${escAttr(channelId)}"` : "";
+            const cname = channelName ? ` data-name="${escAttr(channelName)}"` : "";
+            return `<td class="num"><button type="button" class="err-link"${cid}${cname} ` +
+                   `title="Consulter les messages en erreur">${inner}</button></td>`;
+        }
+        return `<td class="num">${bold ? `<b>${num(count)}</b>` : num(count)}</td>`;
+    };
+
     let rows = channels.map(c =>
         `<tr>
             <td>${c.name || c.channel_id || "—"}</td>
@@ -761,9 +836,10 @@ function renderChannels(channels, error, totals) {
             <td class="num">${num(c.filtered)}</td>
             <td class="num">${num(c.queued)}</td>
             <td class="num">${num(c.sent)}</td>
-            <td class="num">${num(c.error)}</td>
+            ${errCell(c.error, c.channel_id, c.name, false)}
         </tr>`).join("");
     // Ligne de totaux (statistiques agrégées tous canaux), si fournies par l'API.
+    // Un clic sur le total d'erreurs consulte les messages de TOUS les canaux.
     if (totals) {
         rows += `<tr class="totals-row">
             <td><b>Total</b></td><td></td>
@@ -771,11 +847,19 @@ function renderChannels(channels, error, totals) {
             <td class="num"><b>${num(totals.filtered)}</b></td>
             <td class="num"><b>${num(totals.queued)}</b></td>
             <td class="num"><b>${num(totals.sent)}</b></td>
-            <td class="num"><b>${num(totals.error)}</b></td>
+            ${errCell(totals.error, null, null, true)}
         </tr>`;
     }
     body.innerHTML = rows;
-    note.textContent = channels.length + " canal(aux) — statistiques cumulées depuis le dernier reset Mirth.";
+    note.textContent = channels.length + " canal(aux) — statistiques cumulées depuis le dernier reset Mirth. " +
+        "Cliquez sur un compteur d'erreurs pour consulter les messages concernés.";
+
+    // Délégation de clic sur les compteurs d'erreur (ré-attachée à chaque rendu).
+    body.querySelectorAll(".err-link").forEach(btn => {
+        btn.addEventListener("click", () => {
+            openErrorsModal(btn.dataset.channel || null, btn.dataset.name || null);
+        });
+    });
 }
 
 function setupAuto() {
@@ -841,7 +925,153 @@ document.getElementById("range-modal").addEventListener("click", e => {
     if (e.target.id === "range-modal") closeRangeModal();   // clic sur le fond
 });
 document.addEventListener("keydown", e => {
-    if (e.key === "Escape") closeRangeModal();
+    if (e.key === "Escape") { closeRangeModal(); closeErrorsModal(); }
+});
+
+// ---------- Modale Messages en erreur (canaux Mirth) ----------
+// Canal courant de la modale : {id, name}. id null => tous les canaux en erreur.
+let errorsCtx = { id: null, name: null };
+
+function openErrorsModal(channelId, channelName) {
+    errorsCtx = { id: channelId || null, name: channelName || null };
+    const title = channelId
+        ? `⚠ Messages en erreur — ${channelName || channelId}`
+        : "⚠ Messages en erreur — tous les canaux";
+    document.getElementById("errors-modal-title").textContent = title;
+    document.getElementById("errors-modal").classList.add("open");
+    fetchErrorMessages();
+}
+function closeErrorsModal() { document.getElementById("errors-modal").classList.remove("open"); }
+
+async function fetchErrorMessages() {
+    const list = document.getElementById("errors-list");
+    const summary = document.getElementById("errors-summary");
+    summary.textContent = "Chargement…";
+    list.innerHTML = '<div style="display:flex;justify-content:center;padding:40px"><div class="spinner"></div></div>';
+    const qs = new URLSearchParams({ limit: "50" });
+    if (errorsCtx.id) qs.set("channel", errorsCtx.id);
+    try {
+        const r = await fetch(`${API}/api/mirth/messages?${qs.toString()}`);
+        const d = await r.json();
+        if (!d.reachable) {
+            summary.textContent = "API Mirth injoignable.";
+            list.innerHTML = `<div class="muted-note">${escapeHtml(d.error || "Serveur Mirth injoignable.")}</div>`;
+            return;
+        }
+        renderErrorMessages(d);
+    } catch (e) {
+        summary.textContent = "Erreur de requête.";
+        list.innerHTML = `<div class="muted-note">${escapeHtml(e.message)}</div>`;
+    }
+}
+
+function escapeHtml(s) {
+    return String(s == null ? "" : s)
+        .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+}
+
+function renderErrorMessages(d) {
+    const list = document.getElementById("errors-list");
+    const summary = document.getElementById("errors-summary");
+    const msgs = d.messages || [];
+
+    summary.textContent = msgs.length
+        ? `${msgs.length} message(s) en erreur` +
+          (errorsCtx.id ? "" : ` répartis sur ${(d.channels || []).filter(c => c.count).length} canal(aux)`)
+        : "Aucun message en erreur trouvé.";
+
+    if (!msgs.length) {
+        list.innerHTML = '<div class="muted-note">Aucun message en erreur sur la période interrogée ' +
+            '(les statistiques d\'erreur peuvent inclure des messages déjà purgés/relancés).</div>';
+        return;
+    }
+
+    list.innerHTML = msgs.map((m, i) => {
+        const meta = [];
+        meta.push(`<span class="err-meta">🕒 <b>${escapeHtml(m.received_date || "—")}</b></span>`);
+        meta.push(`<span class="err-meta">🔌 <b>${escapeHtml(m.connector || "—")}</b></span>`);
+        if (m.send_attempts != null)
+            meta.push(`<span class="err-meta">↻ retry <b>${escapeHtml(m.send_attempts)}</b></span>`);
+        if (m.category)
+            meta.push(`<span class="err-meta">🏷 <b>${escapeHtml(m.category)}</b></span>`);
+        if (m.error_code != null && m.error_code !== 0)
+            meta.push(`<span class="err-meta">code <b>${escapeHtml(m.error_code)}</b></span>`);
+
+        const chan = errorsCtx.id ? "" :
+            `<span class="err-chan">${escapeHtml(m.channel_name || m.channel_id || "—")}</span>`;
+        const msgIdLabel = m.message_id != null
+            ? `<span class="err-meta">#<b>${escapeHtml(m.message_id)}</b></span>` : "";
+
+        const blocks = [];
+        if (m.error)
+            blocks.push(errBlock("Erreur (texte intégral)", m.error, `err-err-${i}`));
+        if (m.content)
+            blocks.push(errBlock("Message (contenu brut)", m.content, `err-content-${i}`));
+        if (!blocks.length)
+            blocks.push('<div class="muted-note">Aucun détail d\'erreur ni contenu disponible pour ce message.</div>');
+
+        return `<div class="err-item">
+            <div class="err-item-head">
+                <span class="err-caret">▶</span>
+                ${chan}${msgIdLabel}${meta.join("")}
+            </div>
+            <div class="err-item-body">${blocks.join("")}</div>
+        </div>`;
+    }).join("");
+
+    // Stocke les textes bruts (non échappés) pour la copie fidèle au presse-papiers.
+    const store = {};
+    msgs.forEach((m, i) => {
+        if (m.error) store[`err-err-${i}`] = m.error;
+        if (m.content) store[`err-content-${i}`] = m.content;
+    });
+    list._copyStore = store;
+
+    // Dépliage / repliage d'un item.
+    list.querySelectorAll(".err-item-head").forEach(h => {
+        h.addEventListener("click", () => h.parentElement.classList.toggle("open"));
+    });
+    // Boutons de copie (1 clic) — stoppe la propagation pour ne pas replier l'item.
+    list.querySelectorAll(".copy-btn").forEach(btn => {
+        btn.addEventListener("click", ev => {
+            ev.stopPropagation();
+            copyText(list._copyStore[btn.dataset.copy] || "", btn);
+        });
+    });
+}
+
+// Construit un bloc dépliable (label + bouton copier + zone de texte).
+function errBlock(label, text, key) {
+    return `<div class="err-block-label">
+            <span>${escapeHtml(label)}</span>
+            <button type="button" class="copy-btn" data-copy="${key}" title="Copier dans le presse-papiers">📋 Copier</button>
+        </div>
+        <pre class="err-pre">${escapeHtml(text)}</pre>`;
+}
+
+// Copie un texte dans le presse-papiers et confirme visuellement sur le bouton.
+async function copyText(text, btn) {
+    try {
+        await navigator.clipboard.writeText(text);
+    } catch (e) {
+        // Repli si l'API Clipboard est indisponible (contexte non sécurisé).
+        const ta = document.createElement("textarea");
+        ta.value = text; ta.style.position = "fixed"; ta.style.opacity = "0";
+        document.body.appendChild(ta); ta.select();
+        try { document.execCommand("copy"); } catch (_) {}
+        document.body.removeChild(ta);
+    }
+    if (btn) {
+        const old = btn.textContent;
+        btn.textContent = "✓ Copié";
+        setTimeout(() => { btn.textContent = old; }, 1400);
+    }
+}
+
+document.getElementById("closeErrors").addEventListener("click", closeErrorsModal);
+document.getElementById("errors-reload").addEventListener("click", fetchErrorMessages);
+document.getElementById("errors-modal").addEventListener("click", e => {
+    if (e.target.id === "errors-modal") closeErrorsModal();   // clic sur le fond
 });
 
 document.getElementById("refresh").addEventListener("click", loadFull);
