@@ -26,6 +26,19 @@ DEFAULT_DB_PATH = os.path.join(
     "checker_history.db"
 )
 
+# Tables de relevés partageant le même schéma et les mêmes fonctions d'accès :
+#   - 'metrics'        : relevés système de la machine hôte ;
+#   - 'mirth_metrics'  : relevés du processus Mirth (table dédiée, accès facilité).
+# Liste blanche : seules ces valeurs peuvent être interpolées dans le SQL.
+_METRIC_TABLES = ("metrics", "mirth_metrics")
+
+
+def _check_table(table):
+    """Valide un nom de table de relevés (anti-injection) et le renvoie."""
+    if table not in _METRIC_TABLES:
+        raise ValueError(f"Table de relevés inconnue : {table!r}")
+    return table
+
 # Verrou protégeant les opérations qui manipulent le fichier au niveau système
 # (remplacement par import, VACUUM, réinitialisation). La tâche programmée et les
 # threads du serveur web peuvent écrire en parallèle : ce verrou évite qu'un
@@ -87,6 +100,88 @@ def init_db(db_path=DEFAULT_DB_PATH):
             "CREATE INDEX IF NOT EXISTS idx_metrics_tag_ts ON metrics(tag, timestamp)"
         )
 
+        # Table dédiée aux relevés du PROCESSUS MIRTH (cpu/mem/sockets). Schéma
+        # identique à `metrics` pour réutiliser telles quelles les fonctions
+        # d'accès (insert_metric/get_history/... via le paramètre `table`). Les
+        # colonnes disque restent nulles ici. Table séparée => accès direct sans
+        # filtrer par `tag` (les métriques Mirth ne sont plus mêlées au système).
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS mirth_metrics (
+                id              INTEGER PRIMARY KEY AUTOINCREMENT,
+                timestamp       TEXT    NOT NULL,
+                tag             TEXT    NOT NULL DEFAULT 'mirth',
+                cpu_percent     REAL,
+                mem_percent     REAL,
+                mem_used_gb     REAL,
+                mem_total_gb    REAL,
+                disk_percent    REAL,
+                disk_used_gb    REAL,
+                disk_total_gb   REAL,
+                sockets         INTEGER,
+                event           TEXT
+            )
+            """
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_mirth_metrics_ts ON mirth_metrics(timestamp)"
+        )
+
+        # Cache des MESSAGES EN ERREUR de Mirth (par connecteur). Sert uniquement de
+        # cache de contenu : l'API Mirth reste prioritaire pour savoir QUELS messages
+        # sont en erreur (cf. checker_service.cached_error_messages). On ne re-télécharge
+        # que les messages absents du cache, identifiés par le triplet stable
+        # (channel_id, message_id, meta_data_id). Le contenu d'un message est immuable
+        # une fois capté => INSERT OR IGNORE.
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS mirth_messages (
+                id              INTEGER PRIMARY KEY AUTOINCREMENT,
+                channel_id      TEXT    NOT NULL,
+                channel_name    TEXT,
+                message_id      INTEGER,
+                meta_data_id    INTEGER,
+                connector       TEXT,
+                status          TEXT,
+                received_date   TEXT,
+                send_attempts   INTEGER,
+                error_code      INTEGER,
+                category        TEXT,
+                error           TEXT,
+                content         TEXT,
+                cached_at       TEXT    NOT NULL,
+                UNIQUE(channel_id, message_id, meta_data_id)
+            )
+            """
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_mirth_messages_channel "
+            "ON mirth_messages(channel_id)"
+        )
+
+        # Historique de DÉBIT Mirth : à chaque relevé, les compteurs CUMULATIFS
+        # (reçus/filtrés/en file/envoyés/erreurs) globaux (channel_id NULL) et par
+        # canal. Le débit (msg/min) se calcule par delta entre points côté client.
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS mirth_throughput (
+                id            INTEGER PRIMARY KEY AUTOINCREMENT,
+                timestamp     TEXT    NOT NULL,
+                channel_id    TEXT,
+                channel_name  TEXT,
+                received      INTEGER,
+                filtered      INTEGER,
+                queued        INTEGER,
+                sent          INTEGER,
+                error         INTEGER
+            )
+            """
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_mirth_throughput_ts "
+            "ON mirth_throughput(timestamp)"
+        )
+
         # Second jeu de données temporel : les ÉVÈNEMENTS/ALERTES. Indépendant des
         # relevés `metrics`, il se superpose à TOUS les graphiques sous forme de
         # barres verticales colorées et légendées. `category` regroupe les types
@@ -115,9 +210,9 @@ def init_db(db_path=DEFAULT_DB_PATH):
     return db_path
 
 
-def insert_metric(sample, db_path=DEFAULT_DB_PATH):
+def insert_metric(sample, table="metrics", db_path=DEFAULT_DB_PATH):
     """
-    Insère un échantillon de métriques.
+    Insère un échantillon de métriques dans `table` ('metrics' ou 'mirth_metrics').
 
     Args:
         sample (dict): clés attendues (toutes optionnelles sauf cohérence) :
@@ -125,13 +220,15 @@ def insert_metric(sample, db_path=DEFAULT_DB_PATH):
             disk_percent, disk_used_gb, disk_total_gb, sockets.
             'tag' identifie la source du relevé ('system' par défaut, 'mirth', ...).
             Si 'timestamp' absent, l'horodatage courant est utilisé.
+        table (str): table de relevés cible (liste blanche `_METRIC_TABLES`).
     """
+    table = _check_table(table)
     ts = sample.get("timestamp") or datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     conn = _connect(db_path)
     try:
         conn.execute(
-            """
-            INSERT INTO metrics
+            f"""
+            INSERT INTO {table}
                 (timestamp, tag, cpu_percent, mem_percent, mem_used_gb, mem_total_gb,
                  disk_percent, disk_used_gb, disk_total_gb, sockets, event)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
@@ -174,7 +271,7 @@ def _normalize_bound(value, end=False):
 
 
 def get_history(hours=24, date_deb=None, date_fin=None, tag="system", limit=5000,
-                db_path=DEFAULT_DB_PATH):
+                table="metrics", db_path=DEFAULT_DB_PATH):
     """
     Retourne des échantillons triés du plus ancien au plus récent.
 
@@ -196,6 +293,7 @@ def get_history(hours=24, date_deb=None, date_fin=None, tag="system", limit=5000
     Returns:
         list[dict]: échantillons triés par horodatage croissant.
     """
+    table = _check_table(table)
     deb = _normalize_bound(date_deb, end=False)
     fin = _normalize_bound(date_fin, end=True)
     tag = (tag or "").strip() or None
@@ -226,7 +324,7 @@ def get_history(hours=24, date_deb=None, date_fin=None, tag="system", limit=5000
         cur = conn.execute(
             f"""
             SELECT * FROM (
-                SELECT * FROM metrics
+                SELECT * FROM {table}
                 {where}
                 ORDER BY timestamp DESC
                 LIMIT ?
@@ -239,37 +337,46 @@ def get_history(hours=24, date_deb=None, date_fin=None, tag="system", limit=5000
         conn.close()
 
 
-def get_latest(tag="system", db_path=DEFAULT_DB_PATH):
-    """Retourne le dernier échantillon enregistré (pour `tag`), ou None si vide."""
+def get_latest(tag="system", table="metrics", db_path=DEFAULT_DB_PATH):
+    """Retourne le dernier échantillon enregistré (pour `tag`), ou None si vide.
+
+    `tag=None`/'' => pas de filtre de source (pratique pour une table dédiée comme
+    'mirth_metrics' dont tous les relevés partagent la même source).
+    """
+    table = _check_table(table)
     tag = (tag or "").strip() or None
     conn = _connect(db_path)
     try:
         if tag:
             cur = conn.execute(
-                "SELECT * FROM metrics WHERE tag = ? ORDER BY id DESC LIMIT 1", (tag,)
+                f"SELECT * FROM {table} WHERE tag = ? ORDER BY id DESC LIMIT 1", (tag,)
             )
         else:
-            cur = conn.execute("SELECT * FROM metrics ORDER BY id DESC LIMIT 1")
+            cur = conn.execute(f"SELECT * FROM {table} ORDER BY id DESC LIMIT 1")
         row = cur.fetchone()
         return dict(row) if row else None
     finally:
         conn.close()
 
 
-def get_last_valid(tag="system", db_path=DEFAULT_DB_PATH):
+def get_last_valid(tag="system", table="metrics", db_path=DEFAULT_DB_PATH):
     """Retourne le dernier échantillon réel (relevé non nul) pour `tag`, en
-    ignorant les marqueurs d'évènement (boot/restart). None si aucun relevé."""
+    ignorant les marqueurs d'évènement (boot/restart). None si aucun relevé.
+
+    `tag=None`/'' => pas de filtre de source (table dédiée mono-source)."""
+    table = _check_table(table)
     tag = (tag or "").strip() or None
     conn = _connect(db_path)
     try:
         if tag:
             cur = conn.execute(
-                "SELECT * FROM metrics WHERE cpu_percent IS NOT NULL AND tag = ? "
+                f"SELECT * FROM {table} WHERE cpu_percent IS NOT NULL AND tag = ? "
                 "ORDER BY id DESC LIMIT 1", (tag,)
             )
         else:
             cur = conn.execute(
-                "SELECT * FROM metrics WHERE cpu_percent IS NOT NULL ORDER BY id DESC LIMIT 1"
+                f"SELECT * FROM {table} WHERE cpu_percent IS NOT NULL "
+                "ORDER BY id DESC LIMIT 1"
             )
         row = cur.fetchone()
         return dict(row) if row else None
@@ -277,7 +384,8 @@ def get_last_valid(tag="system", db_path=DEFAULT_DB_PATH):
         conn.close()
 
 
-def insert_event_marker(timestamp, event, tag="system", db_path=DEFAULT_DB_PATH):
+def insert_event_marker(timestamp, event, tag="system", table="metrics",
+                        db_path=DEFAULT_DB_PATH):
     """Insère un marqueur (métriques nulles) tagué `event` à l'horodatage donné.
 
     N'insère rien si un enregistrement portant déjà ce triplet (timestamp, event,
@@ -286,20 +394,190 @@ def insert_event_marker(timestamp, event, tag="system", db_path=DEFAULT_DB_PATH)
     Returns:
         bool: True si un marqueur a effectivement été inséré.
     """
+    table = _check_table(table)
     conn = _connect(db_path)
     try:
         cur = conn.execute(
-            "SELECT 1 FROM metrics WHERE timestamp = ? AND event = ? AND tag = ? LIMIT 1",
+            f"SELECT 1 FROM {table} WHERE timestamp = ? AND event = ? AND tag = ? LIMIT 1",
             (timestamp, event, tag),
         )
         if cur.fetchone():
             return False
         conn.execute(
-            "INSERT INTO metrics (timestamp, event, tag) VALUES (?, ?, ?)",
+            f"INSERT INTO {table} (timestamp, event, tag) VALUES (?, ?, ?)",
             (timestamp, event, tag),
         )
         conn.commit()
         return True
+    finally:
+        conn.close()
+
+
+# ==========================================================================
+# CACHE DES MESSAGES EN ERREUR MIRTH (table `mirth_messages`)
+# Cache de CONTENU uniquement : l'API Mirth reste l'autorité sur les messages
+# réellement en erreur. Clé stable = (channel_id, message_id, meta_data_id).
+# ==========================================================================
+# Colonnes (hors id/cached_at) renseignées lors d'un upsert de message.
+_MSG_FIELDS = ("channel_id", "channel_name", "message_id", "meta_data_id",
+               "connector", "status", "received_date", "send_attempts",
+               "error_code", "category", "error", "content")
+
+
+def get_cached_message_keys(channel_id=None, db_path=DEFAULT_DB_PATH):
+    """Ensemble des clés (channel_id, message_id, meta_data_id) déjà en cache.
+
+    Filtrable sur un canal. Sert à déterminer les messages à télécharger (ceux
+    absents du cache) sans relire leur contenu.
+    """
+    conn = _connect(db_path)
+    try:
+        if channel_id:
+            cur = conn.execute(
+                "SELECT channel_id, message_id, meta_data_id FROM mirth_messages "
+                "WHERE channel_id = ?", (channel_id,))
+        else:
+            cur = conn.execute(
+                "SELECT channel_id, message_id, meta_data_id FROM mirth_messages")
+        return {(r[0], r[1], r[2]) for r in cur.fetchall()}
+    finally:
+        conn.close()
+
+
+def get_cached_messages(keys, db_path=DEFAULT_DB_PATH):
+    """Retourne les messages en cache correspondant EXACTEMENT au jeu de `keys`.
+
+    `keys` est un itérable de triplets (channel_id, message_id, meta_data_id). On
+    lit par canal puis on filtre sur le jeu exact, afin que seuls les messages
+    encore signalés en erreur par Mirth (les clés fournies) soient renvoyés —
+    les entrées de cache obsolètes restent en base mais ne ressortent pas.
+    """
+    keys = list(keys)
+    if not keys:
+        return []
+    channel_ids = {str(k[0]) for k in keys}
+    keyset = {(str(k[0]), str(k[1]), str(k[2])) for k in keys}
+    conn = _connect(db_path)
+    try:
+        placeholders = ",".join("?" * len(channel_ids))
+        cur = conn.execute(
+            f"SELECT * FROM mirth_messages WHERE channel_id IN ({placeholders})",
+            tuple(channel_ids))
+        out = []
+        for r in cur.fetchall():
+            d = dict(r)
+            k = (str(d["channel_id"]), str(d["message_id"]), str(d["meta_data_id"]))
+            if k in keyset:
+                out.append(d)
+        return out
+    finally:
+        conn.close()
+
+
+def upsert_mirth_messages(items, db_path=DEFAULT_DB_PATH):
+    """Insère en cache les messages fournis (INSERT OR IGNORE sur la clé stable).
+
+    Le contenu d'un message étant immuable, un message déjà présent est ignoré.
+    Retourne le nombre de lignes réellement insérées.
+    """
+    items = [it for it in items if it and it.get("channel_id") is not None]
+    if not items:
+        return 0
+    now = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    cols = ", ".join(_MSG_FIELDS) + ", cached_at"
+    ph = ", ".join("?" * (len(_MSG_FIELDS) + 1))
+    conn = _connect(db_path)
+    try:
+        inserted = 0
+        for it in items:
+            values = [it.get(f) for f in _MSG_FIELDS] + [now]
+            cur = conn.execute(
+                f"INSERT OR IGNORE INTO mirth_messages ({cols}) VALUES ({ph})", values)
+            inserted += cur.rowcount
+        conn.commit()
+        return inserted
+    finally:
+        conn.close()
+
+
+# ==========================================================================
+# HISTORIQUE DE DÉBIT MIRTH (table `mirth_throughput`)
+# Compteurs cumulatifs relevés périodiquement ; le débit se déduit par delta.
+# ==========================================================================
+def insert_throughput(rows, db_path=DEFAULT_DB_PATH):
+    """Insère un lot de relevés de débit (globaux et/ou par canal).
+
+    Chaque ligne est un dict {timestamp, channel_id (None=global), channel_name,
+    received, filtered, queued, sent, error}. Retourne le nombre de lignes insérées.
+    """
+    rows = [r for r in rows if r]
+    if not rows:
+        return 0
+    now = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    conn = _connect(db_path)
+    try:
+        for r in rows:
+            conn.execute(
+                "INSERT INTO mirth_throughput "
+                "(timestamp, channel_id, channel_name, received, filtered, queued, sent, error) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                (r.get("timestamp") or now, r.get("channel_id"), r.get("channel_name"),
+                 r.get("received"), r.get("filtered"), r.get("queued"),
+                 r.get("sent"), r.get("error")),
+            )
+        conn.commit()
+        return len(rows)
+    finally:
+        conn.close()
+
+
+def get_throughput(hours=24, date_deb=None, date_fin=None, channel_id=None,
+                   limit=20000, db_path=DEFAULT_DB_PATH):
+    """Retourne les relevés de débit triés du plus ancien au plus récent.
+
+    Mêmes modes de sélection que `get_history` (intervalle prioritaire, sinon
+    dernières `hours` heures). `channel_id=None` => série GLOBALE (lignes dont
+    channel_id est NULL) ; sinon, série du canal indiqué.
+    """
+    deb = _normalize_bound(date_deb, end=False)
+    fin = _normalize_bound(date_fin, end=True)
+
+    conn = _connect(db_path)
+    try:
+        clauses, params = [], []
+        if channel_id:
+            clauses.append("channel_id = ?")
+            params.append(channel_id)
+        else:
+            clauses.append("channel_id IS NULL")
+
+        if deb or fin:
+            if deb:
+                clauses.append("timestamp >= ?")
+                params.append(deb)
+            if fin:
+                clauses.append("timestamp <= ?")
+                params.append(fin)
+        elif hours and hours > 0:
+            since = (datetime.datetime.now()
+                     - datetime.timedelta(hours=hours)).strftime("%Y-%m-%d %H:%M:%S")
+            clauses.append("timestamp >= ?")
+            params.append(since)
+
+        where = "WHERE " + " AND ".join(clauses)
+        params.append(limit)
+        cur = conn.execute(
+            f"""
+            SELECT * FROM (
+                SELECT * FROM mirth_throughput
+                {where}
+                ORDER BY timestamp DESC
+                LIMIT ?
+            ) ORDER BY timestamp ASC
+            """,
+            params,
+        )
+        return [dict(row) for row in cur.fetchall()]
     finally:
         conn.close()
 
@@ -403,9 +681,18 @@ def purge_older_than(days=30, db_path=DEFAULT_DB_PATH):
     conn = _connect(db_path)
     try:
         cur = conn.execute("DELETE FROM metrics WHERE timestamp < ?", (cutoff,))
-        # Les évènements/alertes suivent la même rétention que les relevés.
+        # Mêmes rétentions pour les autres jeux de données horodatés par `timestamp`
+        # (relevés Mirth, débit, évènements/alertes). Tables possiblement absentes
+        # sur d'anciennes bases : on ignore l'erreur correspondante. (Le cache des
+        # messages en erreur `mirth_messages` est purgé par sa propre colonne plus bas.)
+        for tbl in ("mirth_metrics", "mirth_throughput", "events"):
+            try:
+                conn.execute(f"DELETE FROM {tbl} WHERE timestamp < ?", (cutoff,))
+            except sqlite3.Error:
+                pass
+        # Cache des messages en erreur : rétention sur la date de réception du message.
         try:
-            conn.execute("DELETE FROM events WHERE timestamp < ?", (cutoff,))
+            conn.execute("DELETE FROM mirth_messages WHERE received_date < ?", (cutoff,))
         except sqlite3.Error:
             pass
         conn.commit()
@@ -602,14 +889,19 @@ def reset_db(db_path=DEFAULT_DB_PATH):
             except sqlite3.Error:
                 deleted = 0
             conn.execute("DELETE FROM metrics")
-            # Vide aussi le second jeu de données (évènements/alertes).
-            try:
-                conn.execute("DELETE FROM events")
-            except sqlite3.Error:
-                pass
+            # Vide aussi les autres jeux de données (relevés Mirth, cache des
+            # messages en erreur, débit, évènements/alertes).
+            for tbl in ("mirth_metrics", "mirth_messages", "mirth_throughput", "events"):
+                try:
+                    conn.execute(f"DELETE FROM {tbl}")
+                except sqlite3.Error:
+                    pass
             # Remet les compteurs d'auto-incrément à zéro s'ils existent.
             try:
-                conn.execute("DELETE FROM sqlite_sequence WHERE name IN ('metrics', 'events')")
+                conn.execute(
+                    "DELETE FROM sqlite_sequence WHERE name IN "
+                    "('metrics', 'mirth_metrics', 'mirth_messages', 'mirth_throughput', 'events')"
+                )
             except sqlite3.Error:
                 pass
             conn.commit()

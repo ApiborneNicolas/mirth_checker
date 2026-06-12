@@ -25,11 +25,16 @@ Résolution de la configuration (ordre de priorité décroissante) :
     3. valeurs par défaut ci-dessous.
 
 Points d'entrée haut niveau (ne lèvent jamais) :
-    get_overview()           -> vue d'ensemble complète (serveur + canaux + totaux)
-    get_channels_overview()  -> liste des canaux et de leurs statistiques
-    get_global_statistics()  -> statistiques agrégées (tous canaux confondus)
-    get_server_info()        -> version, infos JVM/OS, statistiques système
-    get_errors()             -> canaux en erreur (statistique ERROR > 0 ou état d'erreur)
+    get_overview()             -> vue d'ensemble complète (serveur + canaux [+ connecteurs] + totaux)
+    get_channels_overview()    -> liste des canaux et de leurs statistiques
+    get_connectors_overview()  -> liste à plat des connecteurs (source + destinations)
+    get_global_statistics()    -> statistiques agrégées (tous canaux confondus)
+    get_server_info()          -> version, infos JVM/OS, statistiques système
+    get_errors()               -> canaux en erreur (statistique ERROR > 0 ou état d'erreur)
+    get_error_messages()       -> messages en erreur (avec contenu), filtrables par connecteur
+    list_error_message_keys()  -> liste légère (sans contenu) des messages en erreur (cache)
+    get_message()              -> un message complet (avec contenu)
+    build_full_report()        -> rapport détaillé complet (serveur + canaux + connecteurs + erreurs)
 """
 
 import os
@@ -263,6 +268,20 @@ class MirthClient:
         except Exception:
             return None
 
+    def get_message_raw(self, channel_id, message_id, include_content=True):
+        """Réponse brute de /channels/{id}/messages/{messageId} (un seul message),
+        ou None. Sert au téléchargement incrémental d'un message manquant du cache.
+        """
+        query = urllib.parse.urlencode(
+            [("includeContent", "true" if include_content else "false")])
+        path = "/channels/%s/messages/%s?%s" % (
+            urllib.parse.quote(str(channel_id), safe=""),
+            urllib.parse.quote(str(message_id), safe=""), query)
+        try:
+            return self._get_json(path)
+        except Exception:
+            return None
+
 
 # --------------------------------------------------------------------------
 # PARSING DÉFENSIF DES STATUTS DE CANAUX (format JSON variable selon version)
@@ -355,12 +374,13 @@ def _stats_to_channel(stats):
     }
 
 
-def _aggregate_child_statistics(status):
-    """Agrège les statistiques des connecteurs enfants d'un statut de canal.
+def _parse_connectors(status):
+    """Liste des connecteurs (source + destinations) d'un statut de canal.
 
-    Filet de secours lorsque le statut de canal lui-même ne porte pas de bloc
-    `statistics` exploitable : on additionne celles de ses connecteurs (source +
-    destinations) exposées dans `childStatuses`.
+    Lit `childStatuses.dashboardStatus` : chaque connecteur porte son propre bloc
+    `statistics`. Renvoie une liste de dicts {meta_data_id, name, state, received,
+    filtered, queued, sent, error}, triée par metaDataId (source = 0, destinations
+    >= 1). Liste vide si le statut n'expose pas ses connecteurs.
     """
     child = status.get("childStatuses")
     if isinstance(child, dict):
@@ -368,18 +388,47 @@ def _aggregate_child_statistics(status):
     else:
         children = _as_list(child)
 
-    agg = {}
+    connectors = []
     for c in children:
         if not isinstance(c, dict):
             continue
-        for k, v in _parse_statistics(c.get("statistics")).items():
+        cols = _stats_to_channel(_parse_statistics(c.get("statistics")))
+        if cols["queued"] is None and c.get("queued") is not None:
+            cols["queued"] = _coerce_int(c.get("queued"))
+        connectors.append({
+            "meta_data_id": _coerce_int(c.get("metaDataId")),
+            "name": c.get("name"),
+            "state": c.get("state") or status.get("state"),
+            **cols,
+        })
+    connectors.sort(key=lambda x: x["meta_data_id"]
+                    if isinstance(x["meta_data_id"], int) else 9999)
+    return connectors
+
+
+def _aggregate_connectors(connectors):
+    """Somme (en colonnes) les statistiques d'une liste de connecteurs.
+
+    Filet de secours quand le statut de canal ne porte pas de bloc `statistics`
+    exploitable : on additionne celles de ses connecteurs (source + destinations).
+    Une colonne reste None si aucun connecteur ne la renseigne.
+    """
+    cols = {"received": None, "filtered": None, "queued": None,
+            "sent": None, "error": None}
+    for c in connectors:
+        for k in cols:
+            v = c.get(k)
             if isinstance(v, int):
-                agg[k] = agg.get(k, 0) + v
-    return agg
+                cols[k] = (cols[k] or 0) + v
+    return cols
 
 
 def _parse_dashboard_statuses(data):
-    """Normalise la réponse de /channels/statuses en liste de canaux."""
+    """Normalise la réponse de /channels/statuses en liste de canaux.
+
+    Chaque canal porte aussi le détail de ses `connectors` (source + destinations),
+    désormais conservé au lieu d'être seulement agrégé.
+    """
     if not isinstance(data, dict):
         return []
     # Forme habituelle : {"list": {"dashboardStatus": [...]}} ou directement une liste.
@@ -393,11 +442,13 @@ def _parse_dashboard_statuses(data):
     for s in statuses:
         if not isinstance(s, dict):
             continue
+        connectors = _parse_connectors(s)
         stats = _parse_statistics(s.get("statistics"))
-        if not stats:
+        if stats:
+            cols = _stats_to_channel(stats)
+        else:
             # Pas de statistiques au niveau canal : agrégation des connecteurs.
-            stats = _aggregate_child_statistics(s)
-        cols = _stats_to_channel(stats)
+            cols = _aggregate_connectors(connectors)
         # `queued` peut être un champ propre au statut (hors bloc statistics).
         if cols["queued"] is None and s.get("queued") is not None:
             cols["queued"] = _coerce_int(s.get("queued"))
@@ -406,6 +457,7 @@ def _parse_dashboard_statuses(data):
             "channel_id": s.get("channelId"),
             "state": s.get("state"),
             **cols,
+            "connectors": connectors,
         })
     return channels
 
@@ -744,13 +796,21 @@ def get_errors(timeout=8):
     return result
 
 
-def get_error_messages(channel_id=None, limit=50, timeout=8):
+def _matches_connector(item, connector_meta_id):
+    """True si l'item correspond au connecteur ciblé (metaDataId), ou si pas de filtre."""
+    if connector_meta_id is None:
+        return True
+    return str(item.get("meta_data_id")) == str(connector_meta_id)
+
+
+def get_error_messages(channel_id=None, connector_meta_id=None, limit=50, timeout=8):
     """Messages en erreur d'un canal (ou de tous les canaux en erreur).
 
     Si `channel_id` est fourni, renvoie les messages en erreur de ce seul canal ;
     sinon, parcourt tous les canaux ayant au moins une erreur et agrège leurs
-    messages. Chaque message renvoyé porte son `channel_id`/`channel_name`, ce qui
-    permet d'afficher une liste unifiée côté client.
+    messages. `connector_meta_id` (optionnel) restreint à un connecteur précis
+    (0 = source, >= 1 = destinations). Chaque message renvoyé porte son
+    `channel_id`/`channel_name`, ce qui permet d'afficher une liste unifiée.
 
     Ne lève jamais : en cas d'échec, renvoie {"reachable": False, "error": ...}.
     Champs : messages (liste), count (total), channels (récapitulatif par canal),
@@ -774,6 +834,7 @@ def get_error_messages(channel_id=None, limit=50, timeout=8):
             items = _parse_messages(client.get_messages_raw(cid, status="ERROR",
                                                             limit=limit),
                                     channel_id=cid, channel_name=cname)
+            items = [it for it in items if _matches_connector(it, connector_meta_id)]
             per_channel.append({"channel_id": cid, "name": cname,
                                 "count": len(items)})
             all_items.extend(items)
@@ -793,6 +854,148 @@ def get_error_messages(channel_id=None, limit=50, timeout=8):
     result["channel_name"] = cname
     result["reachable"] = True
     return result
+
+
+def get_connectors_overview(channel_id=None, timeout=8):
+    """Liste à plat des connecteurs (source + destinations) de tous les canaux.
+
+    Filtrable sur un canal via `channel_id`. Chaque connecteur porte son canal
+    d'origine (`channel_id`, `channel_name`, `channel_state`) afin d'être affiché
+    dans une liste unifiée. Ne lève jamais.
+    """
+    result = _new_result({"connectors": [], "connector_count": 0,
+                          "channel_count": 0})
+    data, error = _with_client(lambda c: c.get_channels(), timeout=timeout)
+    if data is None:
+        result["error"] = error
+        return result
+
+    channels = data
+    if channel_id:
+        channels = [c for c in channels if c.get("channel_id") == channel_id]
+
+    flat = []
+    for c in channels:
+        for conn in c.get("connectors", []):
+            flat.append({"channel_id": c.get("channel_id"),
+                         "channel_name": c.get("name"),
+                         "channel_state": c.get("state"),
+                         **conn})
+    result["connectors"] = flat
+    result["connector_count"] = len(flat)
+    result["channel_count"] = len(channels)
+    result["reachable"] = True
+    return result
+
+
+def list_error_message_keys(channel_id=None, limit=50, timeout=8):
+    """Liste LÉGÈRE (sans contenu) des messages en erreur — liste autoritaire.
+
+    Même structure que `get_error_messages` mais interroge Mirth avec
+    `includeContent=false` et retire les champs lourds `error`/`content`. C'est la
+    référence consommée par le cache (`checker_service`) : Mirth fait foi sur les
+    messages réellement en erreur à l'instant T, le cache ne fournit que le corps.
+
+    Ne lève jamais. Champs : messages (clés), count, channels (récap par canal).
+    """
+    result = _new_result({"channel_id": channel_id, "messages": [], "count": 0,
+                          "channels": []})
+
+    def _fetch(client):
+        channels = client.get_channels()
+        names = {c.get("channel_id"): c.get("name") for c in channels}
+        if channel_id:
+            targets = [(channel_id, names.get(channel_id))]
+        else:
+            targets = [(c.get("channel_id"), c.get("name")) for c in channels
+                       if isinstance(c.get("error"), int) and c["error"] > 0]
+
+        all_items, per_channel = [], []
+        for cid, cname in targets:
+            raw = client.get_messages_raw(cid, status="ERROR", limit=limit,
+                                          include_content=False)
+            items = _parse_messages(raw, channel_id=cid, channel_name=cname)
+            for it in items:
+                it.pop("content", None)
+                it.pop("error", None)
+            per_channel.append({"channel_id": cid, "name": cname, "count": len(items)})
+            all_items.extend(items)
+        return all_items, per_channel
+
+    data, error = _with_client(_fetch, timeout=timeout)
+    if data is None:
+        result["error"] = error
+        return result
+
+    all_items, per_channel = data
+    all_items.sort(key=lambda x: x.get("received_date") or "", reverse=True)
+    result["messages"] = all_items
+    result["count"] = len(all_items)
+    result["channels"] = per_channel
+    result["reachable"] = True
+    return result
+
+
+def get_message(channel_id, message_id, timeout=8):
+    """Un message complet (avec contenu), parsé en connecteurs en erreur.
+
+    S'appuie sur l'endpoint message unique de Mirth. Ne lève jamais.
+    """
+    result = _new_result({"channel_id": channel_id, "message_id": message_id,
+                          "messages": [], "count": 0})
+
+    def _fetch(client):
+        raw = client.get_message_raw(channel_id, message_id, include_content=True)
+        return _parse_messages(raw, channel_id=channel_id)
+
+    data, error = _with_client(_fetch, timeout=timeout)
+    if data is None:
+        result["error"] = error
+        return result
+    result["messages"] = data
+    result["count"] = len(data)
+    result["reachable"] = True
+    return result
+
+
+def build_full_report(include_messages=False, limit=50, timeout=8):
+    """Rapport détaillé complet de l'état Mirth (JSON-friendly). Ne lève jamais.
+
+    Rassemble en une structure unique : serveur (version + JVM/OS + stats système),
+    totaux globaux, canaux **avec leurs connecteurs**, canaux en erreur, et — sur
+    demande (`include_messages`) — les messages en erreur. Source commune du
+    rapport CLI exhaustif (`--full`) et de la route /api/mirth/report.
+    """
+    ov = get_overview(timeout=timeout)
+    report = {
+        "reachable": ov.get("reachable"),
+        "error": ov.get("error"),
+        "base_url": ov.get("base_url"),
+        "generated_at": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "version": ov.get("version"),
+        "system_info": ov.get("system_info"),
+        "system_stats": ov.get("system_stats"),
+        "channel_count": ov.get("channel_count"),
+        "channels_started": ov.get("channels_started"),
+        "totals": ov.get("totals"),
+        "channels": ov.get("channels", []),
+        "errors": [],
+        "messages": [],
+    }
+    if not ov.get("reachable"):
+        return report
+
+    channels = ov.get("channels", [])
+    faulty = [c for c in channels
+              if (isinstance(c.get("error"), int) and c["error"] > 0)
+              or (c.get("state") or "").upper() in ("ERROR", "PAUSED")]
+    faulty.sort(key=lambda c: (c.get("error") or 0), reverse=True)
+    report["errors"] = faulty
+
+    if include_messages:
+        msgs = get_error_messages(limit=limit, timeout=timeout)
+        report["messages"] = msgs.get("messages", [])
+    return report
 
 
 # ==============================================================================
@@ -836,10 +1039,18 @@ if __name__ == "__main__":
                         help="Délai d'attente réseau en secondes (def: 8)")
     parser.add_argument("-s", "--sections", type=str, default="all",
                         help="Sections à afficher, séparées par des virgules : "
-                             "server,channels,stats,errors (def: all)")
+                             "server,channels,connectors,stats,errors (def: all)")
     parser.add_argument("-c", "--channel", type=str, default=None,
                         help="Filtre : n'affiche que les canaux dont le nom "
                              "contient ce texte (insensible à la casse)")
+    parser.add_argument("-f", "--full", action="store_true",
+                        help="Rapport exhaustif : toutes les sections + le détail "
+                             "des messages en erreur (avec contenu)")
+    parser.add_argument("-j", "--json", action="store_true",
+                        help="Sortie JSON brute du rapport complet (build_full_report) "
+                             "— pratique pour l'exécutable one-shot")
+    parser.add_argument("-l", "--limit", type=int, default=50,
+                        help="Nombre maximum de messages en erreur par canal (def: 50)")
     parser.add_argument("-u", "--url", type=str, default=None,
                         help="URL de base de l'API REST Mirth "
                              "(déf: env / .mirth_config.py / https://localhost:8443/api)")
@@ -858,9 +1069,19 @@ if __name__ == "__main__":
     if args.password:
         os.environ["MIRTH_PASSWORD"] = args.password
 
+    # --json : dump JSON du rapport complet puis sortie (usage exe one-shot).
+    if args.json:
+        report = build_full_report(include_messages=True, limit=args.limit,
+                                   timeout=args.timeout)
+        print(json.dumps(report, ensure_ascii=False, indent=2, default=str))
+        sys.exit(0 if report.get("reachable") else 1)
+
     wanted = [s.strip().lower() for s in args.sections.split(",") if s.strip()]
     if "all" in wanted or not wanted:
-        wanted = ["server", "channels", "stats", "errors"]
+        wanted = ["server", "channels", "connectors", "stats", "errors"]
+    # --full ajoute le détail (lourd) des messages en erreur aux sections de base.
+    if args.full:
+        wanted = ["server", "channels", "connectors", "stats", "errors", "messages"]
 
     # Une seule session : on récupère tout via get_overview.
     ov = get_overview(timeout=args.timeout)
@@ -922,6 +1143,26 @@ if __name__ == "__main__":
         else:
             safe_print("Aucun canal déployé.")
 
+    if "connectors" in wanted:
+        display_header("CONNECTEURS (SOURCE + DESTINATIONS)")
+        rows = sorted(channels, key=lambda c: (c.get("name") or "").lower())
+        table = []
+        for c in rows:
+            for conn in c.get("connectors", []):
+                role = "Source" if conn.get("meta_data_id") == 0 else "Destination"
+                table.append([
+                    fmt(c.get("name")), fmt(conn.get("meta_data_id")), role,
+                    fmt(conn.get("name")), fmt(conn.get("state")),
+                    fmt(conn.get("received")), fmt(conn.get("filtered")),
+                    fmt(conn.get("queued")), fmt(conn.get("sent")),
+                    fmt(conn.get("error"))])
+        if table:
+            print_table(table, headers=["Canal", "#", "Rôle", "Connecteur", "État",
+                                        "Reçus", "Filtrés", "En file", "Envoyés",
+                                        "Erreurs"])
+        else:
+            safe_print("Aucun connecteur exposé par le serveur.")
+
     if "errors" in wanted:
         display_header("CANAUX EN ERREUR")
         faulty = [c for c in channels
@@ -934,3 +1175,31 @@ if __name__ == "__main__":
             print_table(table, headers=["Canal", "État", "Erreurs"])
         else:
             safe_print("Aucun canal en erreur.")
+
+    if "messages" in wanted:
+        display_header("MESSAGES EN ERREUR (DÉTAIL)")
+        # Filtre éventuel par canal : restreint aux canaux affichés ci-dessus.
+        if args.channel:
+            faulty_ids = [c.get("channel_id") for c in channels
+                          if isinstance(c.get("error"), int) and c["error"] > 0]
+            collected = []
+            for cid in faulty_ids:
+                res = get_error_messages(channel_id=cid, limit=args.limit,
+                                         timeout=args.timeout)
+                collected.extend(res.get("messages", []))
+            msgs = sorted(collected, key=lambda x: x.get("received_date") or "",
+                          reverse=True)
+        else:
+            msgs = get_error_messages(limit=args.limit,
+                                      timeout=args.timeout).get("messages", [])
+        if not msgs:
+            safe_print("Aucun message en erreur.")
+        else:
+            table = [[fmt(m.get("received_date")), fmt(m.get("channel_name")),
+                      fmt(m.get("connector")), fmt(m.get("message_id")),
+                      fmt(m.get("send_attempts")), fmt(m.get("error_code")),
+                      (m.get("error") or "").splitlines()[0] if m.get("error") else "-"]
+                     for m in msgs]
+            print_table(table, headers=["Date", "Canal", "Connecteur", "#Msg",
+                                        "Retry", "Code", "Erreur (1re ligne)"])
+            safe_print(f"\n{len(msgs)} message(s) en erreur.")

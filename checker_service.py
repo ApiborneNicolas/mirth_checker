@@ -90,6 +90,10 @@ def _round_floats(obj):
 TAG_SYSTEM = "system"
 TAG_MIRTH = "mirth"
 
+# Table dédiée aux relevés du processus Mirth (cf. lib/database). Les métriques
+# Mirth ne cohabitent plus avec le système dans la table `metrics`.
+TABLE_MIRTH_METRICS = "mirth_metrics"
+
 # ==========================================================================
 # ÉVÈNEMENTS / ALERTES (second jeu de données temporel)
 # Stockés dans la table `events` (cf. lib/database) et superposés à TOUS les
@@ -214,7 +218,7 @@ def scheduled_mirth_check():
     """
     global _mirth_prev_found
     sample = collect_mirth_sample()
-    database.insert_metric(sample)
+    database.insert_metric(sample, table=TABLE_MIRTH_METRICS)
 
     # Présence déduite du relevé : cpu nul => processus introuvable sur ce tick.
     found = sample["cpu_percent"] is not None
@@ -228,6 +232,36 @@ def scheduled_mirth_check():
                                   color=_event_color("mirth"), source="scheduler")
             print("[checker_service] Alerte : arrêt du processus Mirth détecté.")
     _mirth_prev_found = found
+
+
+def collect_mirth_throughput():
+    """Construit le lot de relevés de débit Mirth (global + par canal) ou None.
+
+    Interroge l'API REST Mirth ; si elle est injoignable, renvoie None (rien à
+    enregistrer). Les compteurs sont cumulatifs : le débit se déduit côté client.
+    """
+    ov = mirth_api.get_overview(timeout=8)
+    if not ov.get("reachable"):
+        return None
+    ts = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    totals = ov.get("totals") or {}
+    rows = [{"timestamp": ts, "channel_id": None, "channel_name": None,
+             "received": totals.get("received"), "filtered": totals.get("filtered"),
+             "queued": totals.get("queued"), "sent": totals.get("sent"),
+             "error": totals.get("error")}]
+    for c in ov.get("channels", []):
+        rows.append({"timestamp": ts, "channel_id": c.get("channel_id"),
+                     "channel_name": c.get("name"), "received": c.get("received"),
+                     "filtered": c.get("filtered"), "queued": c.get("queued"),
+                     "sent": c.get("sent"), "error": c.get("error")})
+    return rows
+
+
+def scheduled_mirth_stats():
+    """Tâche programmée 'mirth_throughput' : historise le débit Mirth (cumulatif)."""
+    rows = collect_mirth_throughput()
+    if rows:
+        database.insert_throughput(rows)
 
 
 def mark_startup_events():
@@ -261,6 +295,21 @@ def mark_startup_events():
             database.insert_event(timestamp=gap_str, category="service",
                                   label="Arrêt du checker", color=_event_color("service"),
                                   source="scheduler", dedup=True)
+
+    # 1bis. Même marqueur d'arrêt sur la courbe du processus Mirth (table dédiée),
+    #       pour qu'elle se brise aussi pendant la coupure du checker.
+    mirth_last = database.get_last_valid(table=TABLE_MIRTH_METRICS, tag=None)
+    if mirth_last:
+        try:
+            mlast_dt = datetime.datetime.strptime(mirth_last["timestamp"], fmt)
+        except (ValueError, KeyError, TypeError):
+            mlast_dt = None
+        if mlast_dt:
+            mgap_dt = mlast_dt + datetime.timedelta(minutes=1)
+            mgap_str = mgap_dt.strftime(fmt)
+            if mgap_dt < now and database.insert_event_marker(
+                    mgap_str, "restart", tag=TAG_MIRTH, table=TABLE_MIRTH_METRICS):
+                print(f"[checker_service] Marqueur d'arrêt Mirth inséré à {mgap_str}.")
 
     # 2. Alerte de démarrage du checker (toujours, à l'instant présent).
     database.insert_event(timestamp=now.strftime(fmt), category="service",
@@ -601,28 +650,38 @@ def api_history(req):
     date_fin = (req.get("date_fin") or "").strip() or None
     # tag absent/vide => 'system' (compatibilité) ; tag=all => toutes sources.
     tag = (req.get("tag") or "system").strip() or "system"
-    if tag.lower() == "all":
+    out_tag = tag
+    # Rétro-compatibilité : tag=mirth lit désormais la table dédiée 'mirth_metrics'.
+    table = "metrics"
+    if tag.lower() == "mirth":
+        table, tag = TABLE_MIRTH_METRICS, None
+    elif tag.lower() == "all":
         tag = ""   # get_history interprète '' comme « toutes sources »
 
     if date_deb or date_fin:
-        rows = database.get_history(date_deb=date_deb, date_fin=date_fin, tag=tag)
-        return {"tag": tag, "date_deb": date_deb, "date_fin": date_fin,
+        rows = database.get_history(date_deb=date_deb, date_fin=date_fin,
+                                    tag=tag, table=table)
+        return {"tag": out_tag, "date_deb": date_deb, "date_fin": date_fin,
                 "count": len(rows), "samples": rows}
 
     try:
         hours = float(req.get("hours", 24))
     except ValueError:
         hours = 24
-    rows = database.get_history(hours=hours, tag=tag)
-    return {"tag": tag, "hours": hours, "count": len(rows), "samples": rows}
+    rows = database.get_history(hours=hours, tag=tag, table=table)
+    return {"tag": out_tag, "hours": hours, "count": len(rows), "samples": rows}
 
 
 def api_history_latest(req):
     """Dernier relevé enregistré pour la source ?tag=system (défaut) | mirth | ..."""
     tag = (req.get("tag") or "system").strip() or "system"
-    if tag.lower() == "all":
+    out_tag = tag
+    table = "metrics"
+    if tag.lower() == "mirth":
+        table, tag = TABLE_MIRTH_METRICS, None
+    elif tag.lower() == "all":
         tag = ""
-    return {"tag": tag, "latest": database.get_latest(tag=tag)}
+    return {"tag": out_tag, "latest": database.get_latest(tag=tag, table=table)}
 
 
 # ==========================================================================
@@ -925,11 +984,93 @@ def api_mirth_errors(req):
     return mirth_api.get_errors(timeout=_mirth_timeout(req))
 
 
+def _to_cache_row(m):
+    """Projette un message (mirth_api) sur les colonnes du cache `mirth_messages`."""
+    return {k: m.get(k) for k in database._MSG_FIELDS}
+
+
+def cached_error_messages(channel_id=None, connector=None, limit=50, timeout=8):
+    """Messages en erreur, servis via le cache SQLite avec l'API Mirth pour autorité.
+
+    Stratégie « Mirth fait foi » :
+      1. Mirth fournit la liste LÉGÈRE (sans contenu) des messages actuellement en
+         erreur — l'état provient toujours de l'API.
+      2. On détermine ceux absents du cache (par leur clé stable).
+      3. On ne télécharge (avec contenu) que les canaux ayant des messages manquants,
+         puis on les ajoute au cache.
+      4. On renvoie le contenu depuis le cache, restreint au jeu de clés autoritaire
+         (les entrées de cache obsolètes ne ressortent pas).
+
+    En cas de serveur Mirth injoignable : on renvoie tel quel le diagnostic de
+    l'API (pas de service de cache aveugle), l'API restant prioritaire pour l'état.
+    """
+    keylist = mirth_api.list_error_message_keys(channel_id=channel_id, limit=limit,
+                                                timeout=timeout)
+    if not keylist.get("reachable"):
+        return keylist
+
+    light = keylist.get("messages", [])
+    if connector is not None:
+        light = [m for m in light if str(m.get("meta_data_id")) == str(connector)]
+
+    # Clés autoritaires (ce que Mirth signale en erreur à l'instant T).
+    light_by_key = {(m.get("channel_id"), m.get("message_id"), m.get("meta_data_id")): m
+                    for m in light}
+    auth_keys = list(light_by_key.keys())
+    auth_set = set(auth_keys)
+
+    # Manquants au cache => téléchargement (par canal concerné, avec contenu).
+    have = database.get_cached_message_keys(channel_id=channel_id)
+    missing_channels = {k[0] for k in auth_keys if k not in have}
+    downloaded = 0
+    for cid in missing_channels:
+        res = mirth_api.get_error_messages(channel_id=cid, limit=limit, timeout=timeout)
+        if res.get("reachable"):
+            downloaded += database.upsert_mirth_messages(
+                [_to_cache_row(m) for m in res.get("messages", [])])
+
+    # Restitution depuis le cache, filtrée au jeu autoritaire.
+    cached = database.get_cached_messages(auth_set)
+    messages = []
+    for row in cached:
+        k = (row.get("channel_id"), row.get("message_id"), row.get("meta_data_id"))
+        light_meta = light_by_key.get(k, {})
+        # Les méta légères (état/retry à jour) priment sur celles, figées, du cache.
+        for fld in ("status", "send_attempts", "error_code", "received_date",
+                    "connector", "category", "channel_name"):
+            if light_meta.get(fld) is not None:
+                row[fld] = light_meta[fld]
+        row.pop("cached_at", None)
+        row.pop("id", None)
+        messages.append(row)
+    messages.sort(key=lambda x: x.get("received_date") or "", reverse=True)
+
+    # Récapitulatif par canal (noms issus de la liste légère).
+    names = {m.get("channel_id"): m.get("channel_name") for m in light}
+    counts = {}
+    for m in messages:
+        counts[m["channel_id"]] = counts.get(m["channel_id"], 0) + 1
+    channels = [{"channel_id": cid, "name": names.get(cid), "count": n}
+                for cid, n in counts.items()]
+
+    return {
+        "reachable": True, "error": None, "base_url": keylist.get("base_url"),
+        "channel_id": channel_id, "connector": connector,
+        "channel_name": names.get(channel_id) if channel_id else None,
+        "messages": messages, "count": len(messages), "channels": channels,
+        "cache": {"authoritative": len(auth_keys), "downloaded": downloaded},
+    }
+
+
 def api_mirth_messages(req):
     """Messages en erreur d'un canal Mirth (ou de tous les canaux en erreur).
 
+    Servis via le cache SQLite (`cached_error_messages`) afin de ne pas re-télécharger
+    le contenu à chaque consultation — l'API Mirth restant l'autorité sur l'état.
+
     Paramètres :
       ?channel=<channel_id>   (absent => tous les canaux ayant des erreurs)
+      &connector=<metaDataId> (optionnel : restreint à un connecteur — 0=source)
       &limit=50               (nombre max de messages remontés par canal)
       &timeout=8              (délai réseau en secondes)
 
@@ -938,19 +1079,88 @@ def api_mirth_messages(req):
     et le contenu brut du message.
     """
     channel_id = (req.get("channel") or "").strip() or None
+    connector = (req.get("connector") or "").strip()
+    connector = connector if connector != "" else None
     try:
         limit = int(req.get("limit", 50))
     except ValueError:
         limit = 50
-    return mirth_api.get_error_messages(channel_id=channel_id, limit=limit,
-                                        timeout=_mirth_timeout(req))
+    return cached_error_messages(channel_id=channel_id, connector=connector,
+                                 limit=limit, timeout=_mirth_timeout(req))
 
 
 def api_mirth_process(req):
     """Instantané live du processus Mirth (CPU / mémoire / sockets)."""
     p = probe_mirth_process()
-    p["latest"] = database.get_latest(tag=TAG_MIRTH)
+    p["latest"] = database.get_latest(table=TABLE_MIRTH_METRICS, tag=None)
     return p
+
+
+def api_mirth_history(req):
+    """Historique des relevés du processus Mirth (table dédiée `mirth_metrics`).
+
+    Mêmes conventions que /api/history : ?date_deb=&date_fin= (intervalle,
+    prioritaire) ou ?hours=24 (0 => tout l'historique).
+    """
+    date_deb = (req.get("date_deb") or "").strip() or None
+    date_fin = (req.get("date_fin") or "").strip() or None
+    if date_deb or date_fin:
+        rows = database.get_history(date_deb=date_deb, date_fin=date_fin,
+                                    tag=None, table=TABLE_MIRTH_METRICS)
+        return {"tag": TAG_MIRTH, "date_deb": date_deb, "date_fin": date_fin,
+                "count": len(rows), "samples": rows}
+    try:
+        hours = float(req.get("hours", 24))
+    except ValueError:
+        hours = 24
+    rows = database.get_history(hours=hours, tag=None, table=TABLE_MIRTH_METRICS)
+    return {"tag": TAG_MIRTH, "hours": hours, "count": len(rows), "samples": rows}
+
+
+def api_mirth_history_latest(req):
+    """Dernier relevé enregistré du processus Mirth (table `mirth_metrics`)."""
+    return {"tag": TAG_MIRTH, "latest": database.get_latest(
+        table=TABLE_MIRTH_METRICS, tag=None)}
+
+
+def api_mirth_throughput(req):
+    """Historique de débit Mirth (compteurs cumulatifs reçus/envoyés/erreurs).
+
+    Mêmes conventions que /api/history : ?date_deb=&date_fin= (intervalle,
+    prioritaire) ou ?hours=24. ?channel=<id> => série d'un canal ; absent => série
+    globale (tous canaux confondus). Le débit (msg/min) se calcule par delta côté
+    client.
+    """
+    date_deb = (req.get("date_deb") or "").strip() or None
+    date_fin = (req.get("date_fin") or "").strip() or None
+    channel_id = (req.get("channel") or "").strip() or None
+    if date_deb or date_fin:
+        rows = database.get_throughput(date_deb=date_deb, date_fin=date_fin,
+                                       channel_id=channel_id)
+        return {"channel_id": channel_id, "date_deb": date_deb, "date_fin": date_fin,
+                "count": len(rows), "samples": rows}
+    try:
+        hours = float(req.get("hours", 24))
+    except ValueError:
+        hours = 24
+    rows = database.get_throughput(hours=hours, channel_id=channel_id)
+    return {"channel_id": channel_id, "hours": hours, "count": len(rows),
+            "samples": rows}
+
+
+def api_mirth_report(req):
+    """Rapport Mirth détaillé complet (serveur + canaux + connecteurs + erreurs).
+
+    Paramètres : ?messages=1 (inclure le détail des messages en erreur),
+    &limit=50 (max par canal), &timeout=8.
+    """
+    include = req.get("messages", "0") in ("1", "true", "yes")
+    try:
+        limit = int(req.get("limit", 50))
+    except ValueError:
+        limit = 50
+    return mirth_api.build_full_report(include_messages=include, limit=limit,
+                                       timeout=_mirth_timeout(req))
 
 
 # Types d'informations Mirth disponibles pour /api/getmirthinfo.
@@ -1132,6 +1342,10 @@ def build_router(tasks, started_at):
 
     # API supervision Mirth (API REST + processus)
     router.get("/api/mirth/api", api_mirth_api)
+    router.get("/api/mirth/history", api_mirth_history)
+    router.get("/api/mirth/history/latest", api_mirth_history_latest)
+    router.get("/api/mirth/throughput", api_mirth_throughput)
+    router.get("/api/mirth/report", api_mirth_report)
     router.get("/api/mirth/channels", api_mirth_channels)
     router.get("/api/mirth/stats", api_mirth_stats)
     router.get("/api/mirth/server", api_mirth_server)
@@ -1200,6 +1414,7 @@ def main():
     tasks = [
         RecurringTask(args.interval, scheduled_check, name="metrics-collector"),
         RecurringTask(args.interval, scheduled_mirth_check, name="mirth-collector"),
+        RecurringTask(args.interval, scheduled_mirth_stats, name="mirth-stats-collector"),
     ]
     start_staggered(tasks, step=args.stagger)
     print(f"[checker_service] {len(tasks)} tâches programmées démarrées "

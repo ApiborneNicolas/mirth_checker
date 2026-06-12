@@ -185,6 +185,21 @@ const ENDPOINTS = [
     { id: "/api/history/latest", method: "GET", cat: "History", label: "Dernier relevé",
       desc: "Dernier échantillon enregistré pour une source (tag).",
       params: [ { name: "tag", kind: "select", label: "Source (tag)", options: ["system","mirth"], default: "system" } ] },
+    { id: "/api/mirth/history", method: "GET", cat: "History", label: "Historique — Processus Mirth",
+      desc: "Historique des relevés du processus Mirth (CPU/mémoire/sockets) depuis la table dédiée mirth_metrics. Mêmes conventions que /api/history.",
+      params: [
+          { name: "hours", kind: "number", label: "Dernières heures (0=tout)", default: "24" },
+          { name: "date_deb", kind: "text", label: "Début (YYYY-MM-DD[ HH:MM:SS])", placeholder: "(optionnel)" },
+          { name: "date_fin", kind: "text", label: "Fin (YYYY-MM-DD[ HH:MM:SS])", placeholder: "(optionnel)" }
+      ] },
+    { id: "/api/mirth/throughput", method: "GET", cat: "History", label: "Historique — Débit Mirth",
+      desc: "Historique des compteurs cumulatifs Mirth (reçus/filtrés/en file/envoyés/erreurs). Le débit (msg/min) se calcule par delta entre points. channel absent => série globale ; sinon série du canal.",
+      params: [
+          { name: "channel", kind: "text", label: "ID du canal (global si vide)", placeholder: "(global)" },
+          { name: "hours", kind: "number", label: "Dernières heures (0=tout)", default: "24" },
+          { name: "date_deb", kind: "text", label: "Début (YYYY-MM-DD[ HH:MM:SS])", placeholder: "(optionnel)" },
+          { name: "date_fin", kind: "text", label: "Fin (YYYY-MM-DD[ HH:MM:SS])", placeholder: "(optionnel)" }
+      ] },
     { id: "/api/db/info", method: "GET", cat: "DB", label: "État de la base",
       desc: "Taille, fragmentation, tables et bornes temporelles de la base SQLite.", params: [] },
     { id: "/api/db/integrity", method: "GET", cat: "DB", label: "Intégrité de la base",
@@ -227,9 +242,23 @@ const ENDPOINTS = [
       desc: "Canaux présentant des erreurs (statistique ERROR > 0) ou un état d'erreur.",
       params: [ { name: "timeout", kind: "number", label: "Timeout (s)", default: "8" } ] },
     { id: "/api/mirth/messages", method: "GET", cat: "Mirth", label: "Mirth — Messages en erreur",
-      desc: "Liste des messages en erreur d'un canal (ou de tous les canaux en erreur si aucun canal n'est précisé). Chaque message contient son horodatage, le nombre de tentatives (retry), la catégorie d'erreur, le texte d'erreur intégral et le contenu brut.",
+      desc: "Messages en erreur d'un canal (ou de tous les canaux en erreur si aucun canal n'est précisé). Servis via le cache SQLite (mirth_messages) : seuls les messages absents du cache sont re-téléchargés, l'API Mirth restant l'autorité sur l'état (les messages plus signalés en erreur ne ressortent pas). Chaque message contient son horodatage, le nombre de tentatives (retry), la catégorie d'erreur, le texte d'erreur intégral et le contenu brut.",
       params: [
           { name: "channel", kind: "text", label: "ID du canal (channelId)", placeholder: "(tous les canaux en erreur)" },
+          { name: "connector", kind: "text", label: "Connecteur (metaDataId, 0=source)", placeholder: "(tous)" },
+          { name: "limit", kind: "number", label: "Nb max de messages par canal", default: "50" },
+          { name: "timeout", kind: "number", label: "Timeout (s)", default: "8" }
+      ] },
+    { id: "/api/mirth/connectors", method: "GET", cat: "Mirth", label: "Mirth — Connecteurs",
+      desc: "Liste à plat des connecteurs (source + destinations) de tous les canaux, avec leur état et leurs statistiques par connecteur. Filtrable sur un canal.",
+      params: [
+          { name: "channel", kind: "text", label: "ID du canal (channelId)", placeholder: "(tous)" },
+          { name: "timeout", kind: "number", label: "Timeout (s)", default: "8" }
+      ] },
+    { id: "/api/mirth/report", method: "GET", cat: "Mirth", label: "Mirth — Rapport complet",
+      desc: "Rapport détaillé complet : serveur + JVM, totaux, canaux avec connecteurs, canaux en erreur, et (sur demande) messages en erreur.",
+      params: [
+          { name: "messages", kind: "select", label: "Inclure les messages en erreur", options: ["0","1"], default: "0" },
           { name: "limit", kind: "number", label: "Nb max de messages par canal", default: "50" },
           { name: "timeout", kind: "number", label: "Timeout (s)", default: "8" }
       ] },

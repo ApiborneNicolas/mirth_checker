@@ -23,6 +23,35 @@
         .range-summary { font-size: 13px; color: var(--muted); }
         .range-summary b { color: var(--text); font-weight: 600; }
 
+        /* Séparateur vertical dans le bandeau fusionné (hôte | API Mirth) */
+        .sysinfo-sep { width: 1px; height: 15px; background: var(--border); display: inline-block; }
+
+        /* --- Onglets (Mirth API / Mirth Process / Système) --- */
+        .tabs {
+            display: flex; gap: 4px; flex-wrap: wrap;
+            margin: 6px 0 22px; border-bottom: 1px solid var(--border);
+        }
+        .tabs .tab {
+            appearance: none; background: none; border: none; cursor: pointer;
+            font: inherit; font-weight: 600; font-size: 14px; color: var(--muted);
+            display: inline-flex; align-items: center; gap: 7px;
+            padding: 11px 18px; position: relative; border-radius: 9px 9px 0 0;
+            transition: color .16s ease, background .16s ease;
+        }
+        .tabs .tab:hover { color: var(--text); background: color-mix(in srgb, var(--text) 6%, transparent); }
+        .tabs .tab.active { color: var(--accent); }
+        .tabs .tab.active::after {
+            content: ""; position: absolute; left: 12px; right: 12px; bottom: -1px;
+            height: 2.5px; border-radius: 2px 2px 0 0; background: var(--accent);
+        }
+        .tabs .tab:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+        .tab-pane { display: none; }
+        .tab-pane.active { display: block; animation: tabfade .22s ease; }
+        @keyframes tabfade {
+            from { opacity: 0; transform: translateY(5px); }
+            to   { opacity: 1; transform: none; }
+        }
+
         /* Compléments propres à la modale Période & intervalle */
         .modal-section { margin-bottom: 20px; }
         .modal-section:last-child { margin-bottom: 0; }
@@ -44,6 +73,18 @@
         }
         .err-link:hover { background: color-mix(in srgb, var(--err) 16%, transparent); }
         .totals-row .err-link { color: var(--err); }
+
+        /* Lignes de connecteurs (sous-canaux) dépliables sous chaque canal */
+        .chan-row.expandable .chan-name { cursor: pointer; user-select: none; }
+        .chan-caret { display: inline-block; width: 12px; color: var(--muted);
+                      transition: transform .15s ease; font-size: 11px; }
+        .chan-row.open .chan-caret { transform: rotate(90deg); }
+        .connector-row { background: color-mix(in srgb, var(--panel-2) 55%, transparent); }
+        .connector-row td { color: var(--muted); font-size: 13px; }
+        .connector-row .conn-name { padding-left: 28px; color: var(--text); }
+        .conn-role { font-size: 10px; text-transform: uppercase; letter-spacing: .04em;
+                     color: var(--muted); margin-left: 7px; border: 1px solid var(--border);
+                     border-radius: 5px; padding: 1px 5px; }
 
         /* Modale « Messages en erreur » : plus large, liste d'items dépliables */
         .modal.wide { width: min(960px, calc(100vw - 32px)); }
@@ -171,10 +212,109 @@
         <span title="Nom de la machine">🖥 Hôte : <b id="si-host">—</b></span>
         <span title="Démarrage du système">⏻ Démarré le <b id="si-boot">—</b></span>
         <span title="Heure locale du système">🕐 Heure système : <b id="si-now">—</b></span>
+        <span class="sysinfo-sep" aria-hidden="true"></span>
+        <span title="État de l'API REST Mirth">🔌 API Mirth : <b id="ma-status">—</b></span>
+        <span title="Version du serveur Mirth">🏷 Version : <b id="ma-version">—</b></span>
+        <span title="Canaux déployés (démarrés / total)">📡 Canaux : <b id="ma-channels">—</b></span>
+        <span title="URL de l'API Mirth interrogée">🧩 <b id="ma-url">—</b></span>
     </div>
 
-    <h2 class="section-title">🖥 Système</h2>
+    <!-- ===================== ONGLETS ===================== -->
+    <nav class="tabs" id="tabs" role="tablist" aria-label="Sections du tableau de bord">
+        <button class="tab active" type="button" role="tab" data-tab="api" aria-selected="true">🩺 Mirth API</button>
+        <button class="tab" type="button" role="tab" data-tab="process" aria-selected="false">⚙️ Mirth Process</button>
+        <button class="tab" type="button" role="tab" data-tab="system" aria-selected="false">🖥 Système</button>
+    </nav>
 
+    <!-- ===== Onglet : Mirth API (état REST + canaux/connecteurs + activité) ===== -->
+    <section class="tab-pane active" id="tab-api" role="tabpanel" aria-label="Mirth API">
+    <div class="cards" id="mirth-kpis">
+        <div class="card">
+            <div class="label"><span class="dot" style="background:var(--cpu)"></span>Total reçus</div>
+            <div class="value" id="kpi-received">—</div>
+            <div class="sub" id="kpi-received-sub">tous canaux confondus</div>
+        </div>
+        <div class="card">
+            <div class="label"><span class="dot" style="background:var(--err)"></span>Total erreurs</div>
+            <div class="value" id="kpi-errors">—</div>
+            <div class="sub" id="kpi-errors-sub"></div>
+        </div>
+        <div class="card">
+            <div class="label"><span class="dot" style="background:var(--ok)"></span>Canaux démarrés / Total</div>
+            <div class="value" id="kpi-channels">—</div>
+            <div class="sub" id="kpi-channels-sub"></div>
+        </div>
+        <div class="card">
+            <div class="label"><span class="dot" style="background:var(--sock)"></span>Dernière réponse API</div>
+            <div class="value" id="kpi-lastapi">—</div>
+            <div class="sub" id="kpi-lastapi-sub">en attente…</div>
+        </div>
+    </div>
+
+    <div class="chart-panel" id="throughput-panel">
+        <div class="legend-events">
+            <span>📈 Activité Mirth — débit déduit des compteurs cumulatifs (messages/min entre deux relevés). Une remise à zéro des compteurs (redémarrage Mirth) est ignorée (débit plancher 0).</span>
+        </div>
+        <div class="chart-wrap">
+            <canvas id="throughputChart"></canvas>
+        </div>
+    </div>
+
+    <div class="chart-panel" id="channels-panel">
+        <div class="panel-title">📡 Canaux Mirth (API REST)</div>
+        <table class="mtable" id="channels-table">
+            <thead>
+                <tr>
+                    <th>Canal</th><th>État</th>
+                    <th class="num">Reçus</th><th class="num">Filtrés</th>
+                    <th class="num">En file</th><th class="num">Envoyés</th><th class="num">Erreurs</th>
+                </tr>
+            </thead>
+            <tbody id="channels-body">
+                <tr><td colspan="7" class="muted-note">En attente de l'API Mirth…</td></tr>
+            </tbody>
+        </table>
+        <div class="muted-note" id="channels-note"></div>
+    </div>
+    </section>
+
+    <!-- ===== Onglet : Mirth Process (processus mcservice.exe) ===== -->
+    <section class="tab-pane" id="tab-process" role="tabpanel" aria-label="Mirth Process">
+    <div class="cards" id="mirth-cards">
+        <div class="card">
+            <div class="label"><span class="dot" style="background:var(--cpu)"></span>CPU processus</div>
+            <div class="value" id="mp-cpu">—</div>
+            <div class="sub" id="mp-cpu-sub">en attente…</div>
+        </div>
+        <div class="card">
+            <div class="label"><span class="dot" style="background:var(--mem)"></span>Mémoire processus</div>
+            <div class="value" id="mp-mem">—</div>
+            <div class="sub" id="mp-mem-sub"></div>
+        </div>
+        <div class="card">
+            <div class="label"><span class="dot" style="background:var(--sock)"></span>Sockets</div>
+            <div class="value" id="mp-sock">—</div>
+            <div class="sub" id="mp-sock-sub"></div>
+        </div>
+        <div class="card">
+            <div class="label">Processus</div>
+            <div class="value" id="mp-state">—</div>
+            <div class="sub" id="mp-state-sub"></div>
+        </div>
+    </div>
+
+    <div class="chart-panel">
+        <div class="legend-events">
+            <span>Suivi temporel du processus Mirth (tag <code>mirth</code>) — les courbes restent à 0 lorsque le processus est arrêté ; les barres verticales signalent les évènements (start/stop, alarmes, …).</span>
+        </div>
+        <div class="chart-wrap">
+            <canvas id="mirthChart"></canvas>
+        </div>
+    </div>
+    </section>
+
+    <!-- ===== Onglet : Système (machine hôte) ===== -->
+    <section class="tab-pane" id="tab-system" role="tabpanel" aria-label="Système">
     <div class="cards" id="cards">
         <div class="card">
             <div class="label"><span class="dot" style="background:var(--cpu)"></span>CPU</div>
@@ -210,65 +350,7 @@
             <canvas id="chart"></canvas>
         </div>
     </div>
-
-    <!-- ================= 2e SECTION : SUPERVISION MIRTH ================= -->
-    <h2 class="section-title">🩺 Supervision Mirth</h2>
-
-    <div class="sysinfo" id="mirth-api-bar">
-        <span title="État de l'API REST Mirth">🔌 API Mirth : <b id="ma-status">—</b></span>
-        <span title="Version du serveur Mirth">🏷 Version : <b id="ma-version">—</b></span>
-        <span title="Canaux déployés (démarrés / total)">📡 Canaux : <b id="ma-channels">—</b></span>
-        <span title="URL de l'API Mirth interrogée">🧩 <b id="ma-url">—</b></span>
-    </div>
-
-    <div class="cards" id="mirth-cards">
-        <div class="card">
-            <div class="label"><span class="dot" style="background:var(--cpu)"></span>CPU processus</div>
-            <div class="value" id="mp-cpu">—</div>
-            <div class="sub" id="mp-cpu-sub">en attente…</div>
-        </div>
-        <div class="card">
-            <div class="label"><span class="dot" style="background:var(--mem)"></span>Mémoire processus</div>
-            <div class="value" id="mp-mem">—</div>
-            <div class="sub" id="mp-mem-sub"></div>
-        </div>
-        <div class="card">
-            <div class="label"><span class="dot" style="background:var(--sock)"></span>Sockets</div>
-            <div class="value" id="mp-sock">—</div>
-            <div class="sub" id="mp-sock-sub"></div>
-        </div>
-        <div class="card">
-            <div class="label">Processus</div>
-            <div class="value" id="mp-state">—</div>
-            <div class="sub" id="mp-state-sub"></div>
-        </div>
-    </div>
-
-    <div class="chart-panel">
-        <div class="legend-events">
-            <span>Suivi temporel du processus Mirth (tag <code>mirth</code>) — les courbes restent à 0 lorsque le processus est arrêté ; les barres verticales signalent les évènements (start/stop, alarmes, …).</span>
-        </div>
-        <div class="chart-wrap">
-            <canvas id="mirthChart"></canvas>
-        </div>
-    </div>
-
-    <div class="chart-panel" id="channels-panel">
-        <div class="panel-title">📡 Canaux Mirth (API REST)</div>
-        <table class="mtable" id="channels-table">
-            <thead>
-                <tr>
-                    <th>Canal</th><th>État</th>
-                    <th class="num">Reçus</th><th class="num">Filtrés</th>
-                    <th class="num">En file</th><th class="num">Envoyés</th><th class="num">Erreurs</th>
-                </tr>
-            </thead>
-            <tbody id="channels-body">
-                <tr><td colspan="7" class="muted-note">En attente de l'API Mirth…</td></tr>
-            </tbody>
-        </table>
-        <div class="muted-note" id="channels-note"></div>
-    </div>
+    </section>
 
     <footer>
         <span id="foot-status"><span class="dot pulse" style="background:var(--ok)"></span>Connecté</span>
@@ -277,6 +359,10 @@
 
 <script>
 const API = "";              // même origine que la page
+// La hauteur de la page varie selon l'onglet actif : on empêche le navigateur de
+// restaurer une position de défilement (qui tomberait « au milieu ») et on force
+// l'affichage en haut au chargement.
+if ("scrollRestoration" in history) history.scrollRestoration = "manual";
 let chart = null;
 let autoTimer = null;
 let clockBase = null;        // synchro horloge système : {serverMs, localMs}
@@ -289,6 +375,7 @@ const state = { samples: [], seenIds: new Set() };
 // Cache client distinct pour les relevés du processus Mirth (tag 'mirth').
 const mirthState = { samples: [], seenIds: new Set() };
 let mirthChart = null;
+let throughputChart = null;
 let mirthOverviewTimer = null;
 
 // Second jeu de données temporel : les ÉVÈNEMENTS/ALERTES (table `events`).
@@ -578,6 +665,7 @@ async function loadFull() {
     }
     // 2e section : supervision Mirth (historique processus + live + API REST).
     loadMirthFull();
+    loadThroughput();
     fetchMirthProcess();
     fetchMirthOverview();
     // Évènements/alertes : second jeu de données superposé aux deux graphes.
@@ -607,6 +695,7 @@ async function loadIncremental() {
     }
     // 2e section : relevés incrémentaux du processus Mirth + instantané live.
     loadMirthIncremental();
+    loadThroughput();
     fetchMirthProcess();
     // Évènements/alertes incrémentaux (barres superposées aux deux graphes).
     loadEventsIncremental();
@@ -697,6 +786,95 @@ function buildMirthChart(samples) {
     }
 }
 
+// ---------- Activité Mirth (débit) : /api/mirth/throughput ----------
+async function fetchThroughput(params) {
+    const qs = new URLSearchParams(params).toString();
+    const r = await fetch(`${API}/api/mirth/throughput?${qs}`);
+    if (!r.ok) throw new Error("HTTP " + r.status);
+    return r.json();
+}
+
+// Charge la série globale de débit et (re)dessine le graphe d'activité.
+async function loadThroughput() {
+    try {
+        const data = await fetchThroughput(currentParams());
+        buildThroughputChart(data.samples || []);
+    } catch (e) { /* la section système gère déjà le bandeau hors-ligne */ }
+}
+
+// Graphe d'activité : convertit les compteurs cumulatifs en débit (msg/min) par
+// delta entre points consécutifs. Une baisse du compteur (reset Mirth) => 0.
+function buildThroughputChart(samples) {
+    const labels = [], recv = [], sent = [], err = [];
+    for (let i = 1; i < samples.length; i++) {
+        const a = samples[i - 1], b = samples[i];
+        const dtMin = (tsToMs(b.timestamp) - tsToMs(a.timestamp)) / 60000;
+        if (!(dtMin > 0)) continue;
+        const rate = (x, y) => {
+            if (x == null || y == null) return null;
+            const d = y - x;
+            return d >= 0 ? d / dtMin : 0;   // reset des compteurs => débit plancher 0
+        };
+        labels.push(luxon.DateTime.fromFormat(b.timestamp, "yyyy-MM-dd HH:mm:ss").toJSDate());
+        recv.push(rate(a.received, b.received));
+        sent.push(rate(a.sent, b.sent));
+        err.push(rate(a.error, b.error));
+    }
+
+    const datasets = [
+        { label: "Reçus/min",   data: recv, borderColor: "#38bdf8", backgroundColor: "rgba(56,189,248,.12)", tension: .25, fill: true,  pointRadius: 0, borderWidth: 2, spanGaps: true },
+        { label: "Envoyés/min", data: sent, borderColor: "#22c55e", backgroundColor: "rgba(34,197,94,.10)",  tension: .25, fill: true,  pointRadius: 0, borderWidth: 2, spanGaps: true },
+        { label: "Erreurs/min", data: err,  borderColor: "#ef4444", backgroundColor: "rgba(239,68,68,.12)",  tension: .25, fill: true,  pointRadius: 0, borderWidth: 2, spanGaps: true },
+    ];
+
+    const tc = window.MCTheme ? MCTheme.chartColors() : { tick: "#94a3b8", grid: "rgba(148,163,184,.08)", text: "#e2e8f0" };
+    const cfg = {
+        type: "line",
+        data: { labels, datasets },
+        options: {
+            responsive: true,
+            maintainAspectRatio: false,
+            interaction: { mode: "index", intersect: false },
+            scales: {
+                x: {
+                    type: "time",
+                    time: { tooltipFormat: "dd/MM HH:mm:ss", displayFormats: { minute: "HH:mm", hour: "dd/MM HH:mm", day: "dd/MM" } },
+                    ticks: { color: tc.tick, maxRotation: 0, autoSkipPadding: 20 },
+                    grid: { color: tc.grid }
+                },
+                y: {
+                    min: 0, position: "left",
+                    title: { display: true, text: "msg / min", color: tc.tick },
+                    ticks: { color: tc.tick, precision: 0 },
+                    grid: { color: tc.grid }
+                }
+            },
+            plugins: {
+                legend: { labels: { color: tc.text, usePointStyle: true, boxWidth: 8 } },
+                tooltip: { callbacks: { label: c =>
+                    `${c.dataset.label}: ${c.parsed.y == null ? "—" : c.parsed.y.toFixed(1)}` } }
+            }
+        }
+    };
+
+    if (throughputChart) {
+        throughputChart.data.labels = labels;
+        datasets.forEach((ds, i) => {
+            if (throughputChart.data.datasets[i]) throughputChart.data.datasets[i].data = ds.data;
+            else throughputChart.data.datasets[i] = ds;
+        });
+        throughputChart.options.scales.x.ticks.color = tc.tick;
+        throughputChart.options.scales.x.grid.color = tc.grid;
+        throughputChart.options.scales.y.ticks.color = tc.tick;
+        throughputChart.options.scales.y.grid.color = tc.grid;
+        throughputChart.options.plugins.legend.labels.color = tc.text;
+        throughputChart.update("none");
+    } else {
+        throughputChart = new Chart(document.getElementById("throughputChart"), cfg);
+        throughputChart.update();
+    }
+}
+
 // Met à jour les cartes du processus à partir d'un instantané live (/api/mirth/process).
 function setMirthCards(d) {
     const found = d && d.found;
@@ -732,12 +910,18 @@ function trimMirthWindow() {
     mirthState.seenIds = new Set(mirthState.samples.map(s => s.id));
 }
 
-// Chargement complet de l'historique du processus Mirth (tag 'mirth').
+// Récupère l'historique du processus Mirth depuis sa table dédiée.
+async function fetchMirthHistory(params) {
+    const qs = new URLSearchParams(params).toString();
+    const r = await fetch(`${API}/api/mirth/history?${qs}`);
+    if (!r.ok) throw new Error("HTTP " + r.status);
+    return r.json();
+}
+
+// Chargement complet de l'historique du processus Mirth (table 'mirth_metrics').
 async function loadMirthFull() {
     try {
-        const p = currentParams();
-        p.tag = "mirth";
-        const data = await fetchHistory(p);
+        const data = await fetchMirthHistory(currentParams());
         mirthState.samples = data.samples;
         mirthState.seenIds = new Set(data.samples.map(s => s.id));
         renderMirth();
@@ -749,7 +933,7 @@ async function loadMirthIncremental() {
     if (intervalMode || !mirthState.samples.length) return loadMirthFull();
     try {
         const last = mirthState.samples[mirthState.samples.length - 1].timestamp;
-        const data = await fetchHistory({ tag: "mirth", date_deb: last });
+        const data = await fetchMirthHistory({ date_deb: last });
         for (const s of data.samples) {
             if (!mirthState.seenIds.has(s.id)) {
                 mirthState.samples.push(s);
@@ -770,7 +954,41 @@ async function fetchMirthProcess() {
     } catch (e) { /* ignore */ }
 }
 
-// Vue d'ensemble de l'API REST Mirth (bandeau + table des canaux).
+// Met à jour la ligne de KPI de l'onglet Mirth API (ou la réinitialise).
+function setMirthKpis(d) {
+    const num = v => (v === null || v === undefined) ? "—" : v;
+    const recv = document.getElementById("kpi-received");
+    const errs = document.getElementById("kpi-errors");
+    const chans = document.getElementById("kpi-channels");
+    const last = document.getElementById("kpi-lastapi");
+    if (!d || !d.reachable) {
+        recv.textContent = errs.textContent = chans.textContent = "—";
+        document.getElementById("kpi-errors-sub").textContent = "";
+        document.getElementById("kpi-channels-sub").textContent = "";
+        last.textContent = "—";
+        document.getElementById("kpi-lastapi-sub").textContent = "API injoignable";
+        last.style.color = "var(--err)";
+        return;
+    }
+    const totals = d.totals || {};
+    const started = d.channels_started ?? 0;
+    const total = d.channel_count ?? 0;
+    const stopped = Math.max(total - started, 0);
+    recv.textContent = num(totals.received);
+    errs.textContent = num(totals.error);
+    errs.style.color = (typeof totals.error === "number" && totals.error > 0) ? "var(--err)" : "";
+    document.getElementById("kpi-errors-sub").textContent =
+        (typeof totals.error === "number" && totals.error > 0) ? "à surveiller" : "aucune erreur";
+    chans.textContent = started + " / " + total;
+    document.getElementById("kpi-channels-sub").textContent =
+        stopped > 0 ? (stopped + " arrêté(s)") : "tous démarrés";
+    const now = new Date();
+    last.textContent = now.toLocaleTimeString();
+    last.style.color = "";
+    document.getElementById("kpi-lastapi-sub").textContent = "connectée ✓";
+}
+
+// Vue d'ensemble de l'API REST Mirth (bandeau + KPI + table des canaux).
 async function fetchMirthOverview() {
     const statusEl = document.getElementById("ma-status");
     try {
@@ -781,6 +999,7 @@ async function fetchMirthOverview() {
             statusEl.innerHTML = '<span class="badge off">injoignable</span>';
             document.getElementById("ma-version").textContent = "—";
             document.getElementById("ma-channels").textContent = "—";
+            setMirthKpis(d);
             renderChannels([], d.error);
             return;
         }
@@ -788,9 +1007,11 @@ async function fetchMirthOverview() {
         document.getElementById("ma-version").textContent = d.version || "—";
         document.getElementById("ma-channels").textContent =
             (d.channels_started ?? 0) + " / " + (d.channel_count ?? 0);
+        setMirthKpis(d);
         renderChannels(d.channels || [], null, d.totals);
     } catch (e) {
         statusEl.innerHTML = '<span class="badge off">injoignable</span>';
+        setMirthKpis(null);
         renderChannels([], e.message);
     }
 }
@@ -815,29 +1036,50 @@ function renderChannels(channels, error, totals) {
         return;
     }
     // Cellule « Erreurs » : cliquable (ouvre la liste des messages en erreur)
-    // dès lors que le compteur est strictement positif.
+    // dès lors que le compteur est strictement positif. `connectorId` (metaDataId)
+    // restreint, le cas échéant, la consultation à un connecteur précis.
     const escAttr = s => String(s).replace(/"/g, "&quot;");
-    const errCell = (count, channelId, channelName, bold) => {
+    const errCell = (count, channelId, channelName, bold, connectorId) => {
         if (typeof count === "number" && count > 0) {
             const inner = bold ? `<b>${count}</b>` : count;
             const cid = channelId ? ` data-channel="${escAttr(channelId)}"` : "";
             const cname = channelName ? ` data-name="${escAttr(channelName)}"` : "";
-            return `<td class="num"><button type="button" class="err-link"${cid}${cname} ` +
+            const conn = (connectorId !== null && connectorId !== undefined)
+                ? ` data-connector="${escAttr(connectorId)}"` : "";
+            return `<td class="num"><button type="button" class="err-link"${cid}${cname}${conn} ` +
                    `title="Consulter les messages en erreur">${inner}</button></td>`;
         }
         return `<td class="num">${bold ? `<b>${num(count)}</b>` : num(count)}</td>`;
     };
 
-    let rows = channels.map(c =>
-        `<tr>
-            <td>${c.name || c.channel_id || "—"}</td>
+    let rows = "";
+    for (const c of channels) {
+        const conns = c.connectors || [];
+        const expandable = conns.length > 0;
+        const caret = expandable ? '<span class="chan-caret">▶</span> ' : '';
+        rows += `<tr class="chan-row${expandable ? " expandable" : ""}" data-cid="${escAttr(c.channel_id || "")}">
+            <td class="chan-name">${caret}${c.name || c.channel_id || "—"}</td>
             <td>${stateBadge(c.state)}</td>
             <td class="num">${num(c.received)}</td>
             <td class="num">${num(c.filtered)}</td>
             <td class="num">${num(c.queued)}</td>
             <td class="num">${num(c.sent)}</td>
             ${errCell(c.error, c.channel_id, c.name, false)}
-        </tr>`).join("");
+        </tr>`;
+        // Sous-lignes connecteurs (masquées tant que le canal n'est pas déplié).
+        for (const conn of conns) {
+            const role = conn.meta_data_id === 0 ? "Source" : "Destination";
+            rows += `<tr class="connector-row" data-parent="${escAttr(c.channel_id || "")}" hidden>
+                <td class="conn-name">${conn.name || "—"}<span class="conn-role">${role}</span></td>
+                <td>${stateBadge(conn.state)}</td>
+                <td class="num">${num(conn.received)}</td>
+                <td class="num">${num(conn.filtered)}</td>
+                <td class="num">${num(conn.queued)}</td>
+                <td class="num">${num(conn.sent)}</td>
+                ${errCell(conn.error, c.channel_id, c.name, false, conn.meta_data_id)}
+            </tr>`;
+        }
+    }
     // Ligne de totaux (statistiques agrégées tous canaux), si fournies par l'API.
     // Un clic sur le total d'erreurs consulte les messages de TOUS les canaux.
     if (totals) {
@@ -851,13 +1093,25 @@ function renderChannels(channels, error, totals) {
         </tr>`;
     }
     body.innerHTML = rows;
-    note.textContent = channels.length + " canal(aux) — statistiques cumulées depuis le dernier reset Mirth. " +
-        "Cliquez sur un compteur d'erreurs pour consulter les messages concernés.";
+    note.textContent = channels.length + " canal(aux) — cliquez un canal pour déplier ses connecteurs ; " +
+        "cliquez un compteur d'erreurs pour consulter les messages concernés.";
 
-    // Délégation de clic sur les compteurs d'erreur (ré-attachée à chaque rendu).
+    // Dépliage/repliage des connecteurs d'un canal (ré-attaché à chaque rendu).
+    body.querySelectorAll(".chan-row.expandable").forEach(row => {
+        const cid = row.dataset.cid || "";
+        row.querySelector(".chan-name").addEventListener("click", () => {
+            const open = row.classList.toggle("open");
+            body.querySelectorAll('.connector-row[data-parent="' + cid.replace(/"/g, '\\"') + '"]')
+                .forEach(r => { r.hidden = !open; });
+        });
+    });
+
+    // Délégation de clic sur les compteurs d'erreur (canal ou connecteur).
     body.querySelectorAll(".err-link").forEach(btn => {
-        btn.addEventListener("click", () => {
-            openErrorsModal(btn.dataset.channel || null, btn.dataset.name || null);
+        btn.addEventListener("click", e => {
+            e.stopPropagation();
+            openErrorsModal(btn.dataset.channel || null, btn.dataset.name || null,
+                            btn.dataset.connector !== undefined ? btn.dataset.connector : null);
         });
     });
 }
@@ -929,14 +1183,20 @@ document.addEventListener("keydown", e => {
 });
 
 // ---------- Modale Messages en erreur (canaux Mirth) ----------
-// Canal courant de la modale : {id, name}. id null => tous les canaux en erreur.
-let errorsCtx = { id: null, name: null };
+// Contexte courant de la modale : {id, name, connector}. id null => tous les
+// canaux en erreur ; connector (metaDataId) non nul => un seul connecteur.
+let errorsCtx = { id: null, name: null, connector: null };
 
-function openErrorsModal(channelId, channelName) {
-    errorsCtx = { id: channelId || null, name: channelName || null };
-    const title = channelId
-        ? `⚠ Messages en erreur — ${channelName || channelId}`
-        : "⚠ Messages en erreur — tous les canaux";
+function openErrorsModal(channelId, channelName, connector) {
+    const hasConn = connector !== null && connector !== undefined && connector !== "";
+    errorsCtx = { id: channelId || null, name: channelName || null,
+                  connector: hasConn ? connector : null };
+    const role = hasConn ? (String(connector) === "0" ? "Source" : "Destination " + connector) : "";
+    let title;
+    if (channelId)
+        title = `⚠ Messages en erreur — ${channelName || channelId}` + (hasConn ? ` · ${role}` : "");
+    else
+        title = "⚠ Messages en erreur — tous les canaux";
     document.getElementById("errors-modal-title").textContent = title;
     document.getElementById("errors-modal").classList.add("open");
     fetchErrorMessages();
@@ -950,6 +1210,8 @@ async function fetchErrorMessages() {
     list.innerHTML = '<div style="display:flex;justify-content:center;padding:40px"><div class="spinner"></div></div>';
     const qs = new URLSearchParams({ limit: "50" });
     if (errorsCtx.id) qs.set("channel", errorsCtx.id);
+    if (errorsCtx.connector !== null && errorsCtx.connector !== undefined)
+        qs.set("connector", errorsCtx.connector);
     try {
         const r = await fetch(`${API}/api/mirth/messages?${qs.toString()}`);
         const d = await r.json();
@@ -1081,10 +1343,39 @@ document.getElementById("applyInterval").addEventListener("click", enterInterval
 document.getElementById("clearInterval").addEventListener("click", exitIntervalMode);
 
 // Re-rendu des graphiques quand le thème bascule (couleurs d'axes / légende).
-document.addEventListener("mc-theme-change", () => { if (chart) render(); if (mirthChart) renderMirth(); });
+document.addEventListener("mc-theme-change", () => { if (chart) render(); if (mirthChart) renderMirth(); if (throughputChart) loadThroughput(); });
+
+// ---------- Onglets (Mirth API / Mirth Process / Système) ----------
+const TAB_NAMES = ["api", "process", "system"];
+// Graphe principal de chaque onglet : redimensionné une fois l'onglet visible
+// (un canvas Chart.js créé dans un onglet masqué a une taille nulle).
+const TAB_CHART = { api: () => throughputChart, process: () => mirthChart, system: () => chart };
+
+function activateTab(name) {
+    if (!TAB_NAMES.includes(name)) name = "api";
+    document.querySelectorAll(".tabs .tab").forEach(b => {
+        const on = b.dataset.tab === name;
+        b.classList.toggle("active", on);
+        b.setAttribute("aria-selected", on ? "true" : "false");
+    });
+    document.querySelectorAll(".tab-pane").forEach(p => {
+        p.classList.toggle("active", p.id === "tab-" + name);
+    });
+    try { localStorage.setItem("mc-stats-tab", name); } catch (e) { /* ignore */ }
+    // Le canvas devient mesurable une fois l'onglet affiché : on le redimensionne.
+    requestAnimationFrame(() => { const c = TAB_CHART[name] && TAB_CHART[name](); if (c) c.resize(); });
+}
+
+document.querySelectorAll(".tabs .tab").forEach(b => {
+    b.addEventListener("click", () => activateTab(b.dataset.tab));
+});
 
 setInterval(tickClock, 1000);   // horloge système qui défile entre deux refresh
 updateRangeSummary();
+// Onglet actif initial : dernier consulté (défaut « Mirth API »).
+(function () { let t = "api"; try { t = localStorage.getItem("mc-stats-tab") || "api"; } catch (e) {} activateTab(t); })();
+// Affichage en haut de page (sans animation, malgré scroll-behavior: smooth).
+window.scrollTo({ top: 0, left: 0, behavior: "instant" });
 fetchHostInfo();
 loadFull();
 setupAuto();
