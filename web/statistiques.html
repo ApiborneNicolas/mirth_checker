@@ -106,6 +106,8 @@
         .err-item-body { display: none; padding: 12px 14px; border-top: 1px solid var(--border); }
         .err-item.open .err-item-body { display: block; }
         .err-item.open .err-caret { transform: rotate(90deg); }
+        /* Message ciblé par un lien profond (e-mail d'alerte) */
+        .err-item.err-highlight { border-color: var(--accent); box-shadow: var(--ring); }
         .err-caret { transition: transform .15s ease; color: var(--muted); }
         .err-block-label {
             display: flex; align-items: center; justify-content: space-between;
@@ -1285,12 +1287,14 @@ document.addEventListener("keydown", e => {
 // ---------- Modale Messages en erreur (canaux Mirth) ----------
 // Contexte courant de la modale : {id, name, connector}. id null => tous les
 // canaux en erreur ; connector (metaDataId) non nul => un seul connecteur.
-let errorsCtx = { id: null, name: null, connector: null };
+let errorsCtx = { id: null, name: null, connector: null, highlight: null };
 
-function openErrorsModal(channelId, channelName, connector) {
+function openErrorsModal(channelId, channelName, connector, highlightMsgId) {
     const hasConn = connector !== null && connector !== undefined && connector !== "";
     errorsCtx = { id: channelId || null, name: channelName || null,
-                  connector: hasConn ? connector : null };
+                  connector: hasConn ? connector : null,
+                  highlight: (highlightMsgId !== undefined && highlightMsgId !== null
+                              && highlightMsgId !== "") ? String(highlightMsgId) : null };
     const role = hasConn ? (String(connector) === "0" ? "Source" : "Destination " + connector) : "";
     let title;
     if (channelId)
@@ -1372,7 +1376,7 @@ function renderErrorMessages(d) {
         if (!blocks.length)
             blocks.push('<div class="muted-note">Aucun détail d\'erreur ni contenu disponible pour ce message.</div>');
 
-        return `<div class="err-item">
+        return `<div class="err-item" data-msg-id="${escapeHtml(m.message_id)}">
             <div class="err-item-head">
                 <span class="err-caret">▶</span>
                 ${chan}${msgIdLabel}${meta.join("")}
@@ -1400,6 +1404,17 @@ function renderErrorMessages(d) {
             copyText(list._copyStore[btn.dataset.copy] || "", btn);
         });
     });
+
+    // Lien profond (depuis un e-mail d'alerte) : déplie et met en évidence le
+    // message ciblé, puis fait défiler jusqu'à lui.
+    if (errorsCtx.highlight) {
+        const item = list.querySelector(`.err-item[data-msg-id="${errorsCtx.highlight}"]`);
+        if (item) {
+            item.classList.add("open", "err-highlight");
+            item.scrollIntoView({ behavior: "smooth", block: "center" });
+        }
+        errorsCtx.highlight = null;   // une seule fois
+    }
 }
 
 // Construit un bloc dépliable (label + bouton copier + zone de texte).
@@ -1481,6 +1496,24 @@ window.scrollTo({ top: 0, left: 0, behavior: "instant" });
 fetchHostInfo();
 loadFull();
 setupAuto();
+
+// Lien profond depuis un e-mail d'alerte « message en erreur » :
+//   statistiques.html?errors=1&channel=<id>&connector=<metaDataId>&name=<nom>&msg=<id>
+// Ouvre directement la modale des erreurs filtrée sur le canal/connecteur concerné
+// et met en évidence le message visé. Les paramètres sont retirés de l'URL ensuite
+// afin qu'un rafraîchissement n'ouvre pas de nouveau la modale.
+(function handleErrorDeepLink() {
+    const p = new URLSearchParams(location.search);
+    if (p.get("errors") !== "1") return;
+    const channel = p.get("channel");
+    const connector = p.get("connector");
+    const name = p.get("name");
+    const msg = p.get("msg");
+    try {
+        history.replaceState(null, "", location.pathname);
+    } catch (e) { /* ignore */ }
+    openErrorsModal(channel, name, connector, msg);
+})();
 </script>
 </body>
 </html>

@@ -30,6 +30,7 @@ import math
 import argparse
 import datetime
 import threading
+import urllib.parse
 
 from tabulate import tabulate
 
@@ -50,6 +51,13 @@ DEFAULT_LOGFILE = r"C:\Program Files\Mirth Connect\logs\mirthconnect.log"
 
 # Lecteur système surveillé pour le stockage (C:\ sous Windows, / sinon)
 SYSTEM_DRIVE = os.environ.get("SystemDrive", "C:") + os.sep if os.name == "nt" else "/"
+
+# URL de base publique du service (ex. http://serveur:8800), utilisée pour bâtir
+# les liens profonds dans les e-mails d'alerte (ouverture du dashboard sur le
+# connecteur concerné). Renseignée au démarrage par main() : variable
+# d'environnement CHECKER_BASE_URL si fournie, sinon nom d'hôte + port. None tant
+# que le service n'a pas démarré (les e-mails omettent alors les liens).
+SERVICE_BASE_URL = None
 
 
 # ==========================================================================
@@ -151,6 +159,9 @@ ALARM_CATALOG = [
     {"code": "mirth_up",     "title": "Démarrage du processus Mirth",
      "event_label": "Démarrage Mirth",       "category": "mirth",
      "severity": "warning",  "default_email": True,  "default_mqtt": True},
+    {"code": "mirth_message_error", "title": "Message en erreur",
+     "event_label": "Message en erreur",     "category": "mirth",
+     "severity": "warning",  "default_email": True,  "default_mqtt": True},
 ]
 ALARM_BY_CODE = {a["code"]: a for a in ALARM_CATALOG}
 
@@ -194,6 +205,7 @@ def _build_alarm_context(code, timestamp):
     sysm = database.get_last_valid(tag=TAG_SYSTEM) or {}
     ctx["system"] = {
         "timestamp": sysm.get("timestamp"),
+        "boot_time": system_state.get_boot_time(),
         "cpu_percent": sysm.get("cpu_percent"),
         "mem_percent": sysm.get("mem_percent"),
         "disk_percent": sysm.get("disk_percent"),
@@ -215,12 +227,54 @@ def _build_alarm_context(code, timestamp):
         "errors": totals.get("error"),
         "snapshot_at": ov.get("snapshot_at"),
     }
+    # Alarme « message en erreur » : joint un aperçu des derniers messages en
+    # erreur mis en cache (lecture locale). Pour une alarme réelle, ce champ est
+    # remplacé par la liste exacte des nouveaux messages détectés (cf. emit_alarm/
+    # dispatch_alerts) ; pour un test depuis la page, il fournit un échantillon.
+    if code == "mirth_message_error":
+        ctx["error_messages"] = database.get_recent_error_messages(limit=20)
     return ctx
 
 
 def _pct(v):
     """Formate un pourcentage (ou '—' si inconnu)."""
     return f"{v:.0f} %" if isinstance(v, (int, float)) else "—"
+
+
+# Longueur maximale du texte d'erreur intégral inclus PAR message dans l'e-mail
+# (au-delà, tronqué — le texte complet reste consultable via le lien dashboard).
+_ALERT_ERROR_MAXLEN = 4000
+
+
+def _html_escape(s):
+    """Échappe le texte pour une insertion HTML (corps de l'e-mail)."""
+    return (str("" if s is None else s)
+            .replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;"))
+
+
+def _attr_escape(s):
+    """Échappe une valeur destinée à un attribut HTML entre guillemets (href)."""
+    return _html_escape(s).replace('"', "&quot;")
+
+
+def _dashboard_error_link(m):
+    """Lien profond vers le dashboard, modale d'erreur ouverte sur le connecteur.
+
+    Construit `…/statistiques.html?errors=1&channel=&connector=&name=&msg=` à partir
+    d'un message en erreur, afin que le destinataire de l'alerte ouvre directement
+    le dashboard sur le connecteur concerné avec la modale du message. Renvoie None
+    si l'URL publique du service est inconnue (non démarré) ou le canal non identifié.
+    """
+    if not SERVICE_BASE_URL or not m.get("channel_id"):
+        return None
+    params = {"errors": "1", "channel": m["channel_id"]}
+    if m.get("meta_data_id") is not None:
+        params["connector"] = m["meta_data_id"]
+    if m.get("channel_name"):
+        params["name"] = m["channel_name"]
+    if m.get("message_id") is not None:
+        params["msg"] = m["message_id"]
+    return f"{SERVICE_BASE_URL}/statistiques.html?{urllib.parse.urlencode(params)}"
 
 
 def build_alert_email(ctx):
@@ -244,6 +298,7 @@ def build_alert_email(ctx):
         f"Horodatage     : {ctx['timestamp']}",
         f"Hôte           : {ctx['hostname']}",
         f"Système        : {ctx['os']}",
+        f"Démarrage      : {s.get('boot_time') or '—'}",
         "",
         "— État système (dernier relevé) —————————————————————",
         f"  Relevé       : {s.get('timestamp') or '—'}",
@@ -263,20 +318,59 @@ def build_alert_email(ctx):
         f" / {o.get('channel_count') if o.get('channel_count') is not None else '—'} démarrés",
         f"  Erreurs      : {o.get('errors') if o.get('errors') is not None else '—'}",
         f"  Instantané   : {o.get('snapshot_at') or '—'}",
-        "",
-        "—",
-        "Message automatique du service de supervision Mirth Checker.",
     ]
+    # Détail des messages en erreur (alarme `mirth_message_error`) : liste les
+    # canaux/connecteurs concernés AVEC le texte d'erreur intégral, et — si l'URL
+    # publique du service est connue — un lien profond ouvrant le dashboard sur le
+    # connecteur visé (modale du message). Présent seulement si le contexte le porte.
+    msgs = ctx.get("error_messages") or []
+    urls = []   # URL complètes affichées dans le corps (rendues cliquables en HTML)
+    if msgs:
+        lines += ["", f"— Messages en erreur ({len(msgs)}) ————————————————————"]
+        for m in msgs[:20]:
+            who = m.get("channel_name") or m.get("channel_id") or "?"
+            conn = m.get("connector") or "-"
+            head = (f"  - {who} / {conn} — msg #{m.get('message_id')} "
+                    f"({m.get('received_date') or '—'})")
+            if m.get("error_code"):
+                head += f" [code {m.get('error_code')}]"
+            lines.append(head)
+            err = (m.get("error") or "").strip()
+            if err:
+                if len(err) > _ALERT_ERROR_MAXLEN:
+                    err = err[:_ALERT_ERROR_MAXLEN] + " […]"
+                lines.append("    Erreur (texte intégral) :")
+                lines += [f"      {ln}" for ln in err.splitlines()]
+            url = _dashboard_error_link(m)
+            if url:
+                # URL complète affichée directement sous le message ; elle reste
+                # visible/copiable en texte et est rendue cliquable en HTML.
+                lines.append(f"    ↳ {url}")
+                urls.append(url)
+        if len(msgs) > 20:
+            lines.append(f"  ... et {len(msgs) - 20} autre(s).")
+    lines += ["", "—",
+              "Message automatique du service de supervision Mirth Checker."]
     message = "\n".join(lines)
-    html = (
-        "<div style=\"font-family:'Segoe UI',Arial,sans-serif;color:#1e293b\">"
-        f"<h2 style='margin:0 0 4px'>{ctx['title']}</h2>"
+
+    # Corps HTML : on échappe le texte puis on rend cliquables les URL affichées en
+    # clair (le texte visible reste l'URL complète, garantie cliquable même si le
+    # client de messagerie n'auto-lie pas les liens en texte brut).
+    body_html = _html_escape(message)
+    for url in urls:
+        esc = _html_escape(url)
+        body_html = body_html.replace(
+            esc, f"<a href=\"{_attr_escape(url)}\">{esc}</a>")
+    html = "".join([
+        "<div style=\"font-family:'Segoe UI',Arial,sans-serif;color:#1e293b\">",
+        f"<h2 style='margin:0 0 4px'>{_html_escape(ctx['title'])}</h2>",
         f"<p style='margin:0 0 14px;color:#64748b'>{sev} · {ctx['timestamp']} · "
-        f"{ctx['hostname']}</p>"
+        f"{_html_escape(ctx['hostname'])}</p>",
         "<pre style=\"background:#f1f5f9;border:1px solid #cbd5e1;border-radius:8px;"
         "padding:12px 14px;font-size:13px;white-space:pre-wrap\">"
-        f"{message}</pre></div>"
-    )
+        f"{body_html}</pre>",
+        "</div>",
+    ])
     return subject, message, html
 
 
@@ -302,7 +396,7 @@ def _deliver(method, recipient, ctx):
              "error": f"méthode « {method} » non implémentée"}]
 
 
-def dispatch_alerts(code, timestamp, config=None, test=False):
+def dispatch_alerts(code, timestamp, config=None, test=False, context_extra=None):
     """Émet l'ensemble des notifications activées pour une alarme (envoi multiple).
 
     N'écrit JAMAIS en base : l'évènement associé est inséré séparément par
@@ -316,6 +410,9 @@ def dispatch_alerts(code, timestamp, config=None, test=False):
             courant de la page, éventuellement non enregistré). Si None, la
             configuration enregistrée est lue en base.
         test (bool): préfixe le titre par [TEST].
+        context_extra (dict|None): éléments de contexte propres à l'occurrence de
+            l'alarme (ex. la liste exacte des messages en erreur détectés), fusionnés
+            dans le contexte du message — priment sur les valeurs construites en base.
 
     Returns:
         list[dict]: résultats d'envoi {method, dest, ok[, error]}.
@@ -330,6 +427,8 @@ def dispatch_alerts(code, timestamp, config=None, test=False):
     methods = cfg.get("methods") or {}
 
     ctx = _build_alarm_context(code, timestamp)
+    if context_extra:
+        ctx.update(context_extra)
     if test:
         ctx["title"] = "[TEST] " + ctx["title"]
 
@@ -349,7 +448,7 @@ def dispatch_alerts(code, timestamp, config=None, test=False):
     return results
 
 
-def emit_alarm(code, timestamp=None, dedup=False):
+def emit_alarm(code, timestamp=None, dedup=False, detail=None, context=None):
     """Enregistre l'évènement d'une alarme et déclenche ses notifications.
 
     Point d'entrée unique des alarmes : insère la barre d'évènement (table
@@ -357,6 +456,15 @@ def emit_alarm(code, timestamp=None, dedup=False):
     été créé, lance l'envoi des notifications dans un thread dédié (non bloquant
     pour la tâche de relevé). `dedup=True` évite de ré-alerter pour un évènement
     déjà enregistré (ex. même boot système au redémarrage du checker).
+
+    Args:
+        code (str): code d'alarme du catalogue.
+        timestamp (str|None): horodatage de l'évènement ; courant si None.
+        dedup (bool): ignore l'émission si un évènement identique existe déjà.
+        detail (str|None): complément libre stocké dans la colonne `details` de
+            l'évènement (ex. récapitulatif des messages en erreur détectés).
+        context (dict|None): contexte propre à l'occurrence, transmis à
+            `dispatch_alerts` pour enrichir le corps de la notification.
 
     Returns:
         int|None: l'identifiant de l'évènement inséré, ou None si ignoré (dedup).
@@ -368,10 +476,12 @@ def emit_alarm(code, timestamp=None, dedup=False):
     ts = timestamp or datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     eid = database.insert_event(
         timestamp=ts, category=entry["category"], label=entry["event_label"],
-        color=_event_color(entry["category"]), source="scheduler", dedup=dedup)
+        color=_event_color(entry["category"]), source="scheduler",
+        details=detail, dedup=dedup)
     # Un évènement réellement créé (non dédupliqué) déclenche la notification.
     if eid is not None:
         threading.Thread(target=dispatch_alerts, args=(code, ts),
+                         kwargs={"context_extra": context},
                          name=f"alert-{code}", daemon=True).start()
     return eid
 
@@ -498,9 +608,113 @@ def scheduled_mirth_overview():
     canal et connecteur. Sert ensuite la page sans nouvel appel API live. Si
     l'API est injoignable, seule la ligne serveur (reachable=0) est écrite : la
     série se brise visiblement sur la coupure.
+
+    Détecte aussi, sur le même tick, l'arrivée de nouveaux messages en erreur
+    (canal/connecteur) afin d'en émettre l'alarme `mirth_message_error`.
     """
     ov = mirth_api.get_overview(timeout=8)
     database.insert_mirth_snapshot(ov)
+    detect_mirth_error_messages(ov)
+
+
+# Jeu des clés (channel_id, message_id, meta_data_id) des messages signalés en
+# erreur par Mirth au tick précédent. None = inconnu (avant le premier relevé) :
+# le premier tick établit la base SANS alerter, afin que les erreurs déjà présentes
+# au démarrage ne soient pas comptées comme « nouvelles ».
+_mirth_error_keys_prev = None
+
+
+def detect_mirth_error_messages(overview, timeout=8):
+    """Détecte les nouveaux messages en erreur depuis le tick précédent.
+
+    Compare le jeu autoritaire des clés de messages en erreur (fourni par Mirth,
+    `list_error_message_keys` — léger, sans contenu) à celui du tick précédent.
+    Toute clé nouvelle correspond à un message fraîchement passé en erreur : on en
+    met le contenu en cache puis on émet l'alarme `mirth_message_error` (un seul
+    évènement par tick, agrégeant les messages concernés).
+
+    L'overview courant sert de filet rapide : si AUCUN canal n'affiche d'erreur et
+    qu'aucune erreur n'était suivie, on évite l'appel supplémentaire. En cas de
+    serveur injoignable, on ne fait rien (l'alarme `mirth_down` couvre la coupure ;
+    la base de comparaison est conservée pour le retour en ligne).
+    """
+    global _mirth_error_keys_prev
+    if not overview.get("reachable"):
+        return
+
+    # Filet rapide : pas d'erreur maintenant ni précédemment => rien à comparer.
+    has_errors_now = any(
+        isinstance(c.get("error"), int) and c["error"] > 0
+        for c in overview.get("channels", []))
+    if not has_errors_now and not _mirth_error_keys_prev:
+        _mirth_error_keys_prev = set()
+        return
+
+    keylist = mirth_api.list_error_message_keys(timeout=timeout)
+    if not keylist.get("reachable"):
+        return
+
+    current = {(m.get("channel_id"), m.get("message_id"), m.get("meta_data_id")): m
+               for m in keylist.get("messages", [])}
+    current_keys = set(current.keys())
+
+    # Premier tick : on établit la base sans alerter (erreurs déjà présentes).
+    if _mirth_error_keys_prev is None:
+        _mirth_error_keys_prev = current_keys
+        return
+
+    new_keys = current_keys - _mirth_error_keys_prev
+    _mirth_error_keys_prev = current_keys
+    if new_keys:
+        _handle_new_error_messages([current[k] for k in new_keys], timeout=timeout)
+
+
+def _format_error_messages_detail(msgs):
+    """Récapitulatif court (colonne `details` de l'évènement) des messages."""
+    parts = []
+    for m in msgs[:20]:
+        who = m.get("channel_name") or m.get("channel_id") or "?"
+        parts.append(f"{who} / {m.get('connector') or '-'} (msg #{m.get('message_id')})")
+    extra = f" +{len(msgs) - 20}" if len(msgs) > 20 else ""
+    return f"{len(msgs)} nouveau(x) message(s) en erreur : " + " ; ".join(parts) + extra
+
+
+def _handle_new_error_messages(new_msgs, timeout=8):
+    """Met en cache les nouveaux messages en erreur puis émet l'alarme associée.
+
+    Le contenu (texte d'erreur intégral + corps brut) des nouveaux messages est
+    téléchargé par canal concerné et ajouté au cache `mirth_messages` (INSERT OR
+    IGNORE). Les messages détectés (liste légère, sans texte d'erreur) sont ensuite
+    enrichis depuis le cache afin que l'e-mail d'alerte porte le texte d'erreur
+    intégral. L'alarme passe par le processus standard (`emit_alarm` => évènement +
+    notification selon config).
+    """
+    for cid in {m.get("channel_id") for m in new_msgs if m.get("channel_id")}:
+        res = mirth_api.get_error_messages(channel_id=cid, timeout=timeout)
+        if res.get("reachable"):
+            database.upsert_mirth_messages(
+                [_to_cache_row(m) for m in res.get("messages", [])])
+
+    # Enrichit chaque message détecté avec le texte d'erreur/contenu mis en cache
+    # (la liste autoritaire est légère : sans `error` ni `content`).
+    new_keys = [(m.get("channel_id"), m.get("message_id"), m.get("meta_data_id"))
+                for m in new_msgs]
+    cached = {(str(r.get("channel_id")), str(r.get("message_id")),
+               str(r.get("meta_data_id"))): r
+              for r in database.get_cached_messages(new_keys)}
+    enriched = []
+    for m in new_msgs:
+        k = (str(m.get("channel_id")), str(m.get("message_id")),
+             str(m.get("meta_data_id")))
+        full = cached.get(k)
+        if full:
+            m = {**m, "error": full.get("error"), "content": full.get("content")}
+        enriched.append(m)
+
+    detail = _format_error_messages_detail(enriched)
+    log.log(f"[checker_service] Alerte : {detail}")
+    emit_alarm("mirth_message_error", detail=detail,
+               context={"error_messages": enriched})
 
 
 def mark_startup_events():
@@ -1798,6 +2012,16 @@ def main():
     args = parser.parse_args()
 
     DEFAULT_LOGFILE = args.logfile
+
+    # URL publique du service pour les liens profonds des e-mails d'alerte :
+    # CHECKER_BASE_URL si fournie, sinon nom d'hôte de la machine + port d'écoute.
+    global SERVICE_BASE_URL
+    env_url = (os.environ.get("CHECKER_BASE_URL") or "").strip().rstrip("/")
+    if env_url:
+        SERVICE_BASE_URL = env_url
+    else:
+        host = system_state.get_hostname() or "localhost"
+        SERVICE_BASE_URL = f"http://{host}:{args.port}"
 
     # Identifiants Mirth fournis en ligne de commande : injectés dans
     # l'environnement, source la plus prioritaire pour mirth_api.get_config().

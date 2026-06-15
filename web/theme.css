@@ -306,7 +306,7 @@ th, td, table.mtable th, table.mtable td {
     text-align: left; padding: 8px 10px; border-bottom: 1px solid var(--border-soft);
 }
 th, table.mtable th { color: var(--muted); font-weight: 650; text-transform: uppercase; letter-spacing: .03em; font-size: 11px; }
-td.num, th.num, table.mtable td.num { text-align: right; font-variant-numeric: tabular-nums; }
+td.num, th.num, table.mtable td.num, table.mtable th.num { text-align: right; font-variant-numeric: tabular-nums; }
 tbody tr { transition: background-color .12s; }
 tbody tr:hover td { background: color-mix(in srgb, var(--panel-2) 45%, transparent); }
 table.mtable tr.totals-row td { border-top: 2px solid var(--border); border-bottom: none; background: color-mix(in srgb, var(--muted) 8%, transparent); }

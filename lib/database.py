@@ -562,6 +562,29 @@ def get_cached_messages(keys, db_path=DEFAULT_DB_PATH):
         conn.close()
 
 
+def get_recent_error_messages(limit=20, db_path=DEFAULT_DB_PATH):
+    """Derniers messages en erreur mis en cache (aperçu, sans appel réseau).
+
+    Sert à bâtir un corps d'alerte représentatif (ex. test de l'alarme
+    `mirth_message_error` depuis la page). Le contenu peut être obsolète — c'est
+    un simple échantillon du cache, l'API Mirth restant l'autorité sur l'état.
+    """
+    conn = _connect(db_path)
+    try:
+        cur = conn.execute(
+            "SELECT * FROM mirth_messages "
+            "ORDER BY received_date DESC, id DESC LIMIT ?", (limit,))
+        out = []
+        for r in cur.fetchall():
+            d = dict(r)
+            d.pop("cached_at", None)
+            d.pop("id", None)
+            out.append(d)
+        return out
+    finally:
+        conn.close()
+
+
 def upsert_mirth_messages(items, db_path=DEFAULT_DB_PATH):
     """Insère en cache les messages fournis (INSERT OR IGNORE sur la clé stable).
 
