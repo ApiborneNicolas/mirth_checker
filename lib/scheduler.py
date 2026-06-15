@@ -14,10 +14,12 @@ import threading
 import traceback
 import datetime
 
+from . import log
+
 
 class RecurringTask:
     def __init__(self, interval, func, name="recurring-task", run_immediately=True,
-                 start_delay=0.0, anchor=None):
+                 start_delay=0.0, anchor=None, on_complete=None):
         """
         Args:
             interval (float): délai en secondes entre deux exécutions.
@@ -34,6 +36,10 @@ class RecurringTask:
                 `interval` et conservent un décalage `start_delay` constant à
                 chaque cycle (pas de dérive). Si None, l'ancre est posée au
                 démarrage du thread.
+            on_complete (callable|None): hook appelé après CHAQUE exécution (succès
+                ou échec), une fois `last_duration` mis à jour, avec la tâche en
+                argument. Sert p. ex. à rafraîchir une ligne d'état console. Les
+                exceptions qu'il lève sont ignorées (ne doivent pas tuer la boucle).
         """
         self.interval = interval
         self.func = func
@@ -41,6 +47,7 @@ class RecurringTask:
         self.run_immediately = run_immediately
         self.start_delay = start_delay
         self.anchor = anchor
+        self.on_complete = on_complete
         self._stop_event = threading.Event()
         self._thread = None
         self.last_run = None
@@ -77,9 +84,18 @@ class RecurringTask:
                 self.run_count += 1
             except Exception as e:  # une tâche qui échoue ne doit pas tuer la boucle
                 self.last_error = str(e)
-                print(f"[scheduler:{self.name}] Erreur : {e}")
-                traceback.print_exc()
+                # Logs persistants (effacent/redessinent la ligne d'état console).
+                log.log(f"[scheduler:{self.name}] Erreur : {e}")
+                log.log(traceback.format_exc(), newline=False)
             self.last_duration = round(time.monotonic() - start, 4)
+
+            # Hook de fin d'exécution (ligne d'état console, etc.). Toute erreur
+            # ici est avalée pour ne pas interrompre la boucle de relevé.
+            if self.on_complete is not None:
+                try:
+                    self.on_complete(self)
+                except Exception:
+                    pass
 
             # Échéance suivante sur la grille. Si l'exécution a débordé d'un ou
             # plusieurs créneaux, on saute les ticks manqués pour se resynchroniser
@@ -93,9 +109,9 @@ class RecurringTask:
                     next_run += self.interval
                     missed += 1
                 self.overruns += missed
-                print(f"[scheduler:{self.name}] Dépassement : relevé plus long que "
-                      f"l'intervalle {self.interval}s — {missed} créneau(x) sauté(s), "
-                      f"resynchronisation sur la grille.")
+                log.log(f"[scheduler:{self.name}] Dépassement : relevé plus long que "
+                        f"l'intervalle {self.interval}s — {missed} créneau(x) sauté(s), "
+                        f"resynchronisation sur la grille.")
 
     def start(self):
         """Démarre la boucle dans un thread daemon. Sans effet si déjà lancée."""

@@ -34,7 +34,7 @@ import threading
 from tabulate import tabulate
 
 # --- Import des librairies internes (dossier lib/) -------------------------
-from lib import database, webserver
+from lib import database, webserver, log
 from lib.scheduler import RecurringTask, start_staggered
 
 # --- Import des scripts existants en tant que librairies -------------------
@@ -323,7 +323,7 @@ def dispatch_alerts(code, timestamp, config=None, test=False):
     try:
         cfg = config if config is not None else database.get_alert_config()
     except Exception as e:
-        print(f"[checker_service] Alerte {code} : lecture config impossible ({e}).")
+        log.log(f"[checker_service] Alerte {code} : lecture config impossible ({e}).")
         return []
 
     rules = (cfg.get("rules") or {}).get(code, {})
@@ -344,7 +344,7 @@ def dispatch_alerts(code, timestamp, config=None, test=False):
             results.append(res)
             tag = "TEST " if test else ""
             state = "envoyée" if res["ok"] else ("ECHEC : " + res.get("error", "erreur"))
-            print(f"[checker_service] Alerte {tag}{code} via {res['method']} -> "
+            log.log(f"[checker_service] Alerte {tag}{code} via {res['method']} -> "
                   f"{res.get('dest') or '-'} : {state}.")
     return results
 
@@ -363,7 +363,7 @@ def emit_alarm(code, timestamp=None, dedup=False):
     """
     entry = ALARM_BY_CODE.get(code)
     if not entry:
-        print(f"[checker_service] Alarme inconnue : {code!r} — ignorée.")
+        log.log(f"[checker_service] Alarme inconnue : {code!r} — ignorée.")
         return None
     ts = timestamp or datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     eid = database.insert_event(
@@ -482,10 +482,10 @@ def scheduled_mirth_check():
     if _mirth_prev_found is not None and found != _mirth_prev_found:
         if found:
             emit_alarm("mirth_up")
-            print("[checker_service] Alerte : démarrage du processus Mirth détecté.")
+            log.log("[checker_service] Alerte : démarrage du processus Mirth détecté.")
         else:
             emit_alarm("mirth_down")
-            print("[checker_service] Alerte : arrêt du processus Mirth détecté.")
+            log.log("[checker_service] Alerte : arrêt du processus Mirth détecté.")
     _mirth_prev_found = found
 
 
@@ -530,7 +530,7 @@ def mark_startup_events():
         gap_dt = last_dt + datetime.timedelta(minutes=1)
         gap_str = gap_dt.strftime(fmt)
         if gap_dt < now and database.insert_event_marker(gap_str, "restart"):
-            print(f"[checker_service] Marqueur d'arrêt inséré à {gap_str}.")
+            log.log(f"[checker_service] Marqueur d'arrêt inséré à {gap_str}.")
             emit_alarm("checker_down", timestamp=gap_str, dedup=True)
 
     # 1bis. Même marqueur d'arrêt sur la courbe du processus Mirth (table dédiée),
@@ -546,7 +546,7 @@ def mark_startup_events():
             mgap_str = mgap_dt.strftime(fmt)
             if mgap_dt < now and database.insert_event_marker(
                     mgap_str, "restart", tag=TAG_MIRTH, table=TABLE_MIRTH_METRICS):
-                print(f"[checker_service] Marqueur d'arrêt Mirth inséré à {mgap_str}.")
+                log.log(f"[checker_service] Marqueur d'arrêt Mirth inséré à {mgap_str}.")
 
     # 2. Alerte de démarrage du checker (toujours, à l'instant présent).
     emit_alarm("checker_up", timestamp=now.strftime(fmt))
@@ -560,8 +560,35 @@ def mark_startup_events():
     if boot_dt and (last_dt is None or boot_dt > last_dt):
         boot_str = boot_dt.strftime(fmt)
         if database.insert_event_marker(boot_str, "boot"):
-            print(f"[checker_service] Marqueur de démarrage système inséré à {boot_str}.")
+            log.log(f"[checker_service] Marqueur de démarrage système inséré à {boot_str}.")
         emit_alarm("system_boot", timestamp=boot_str, dedup=True)
+
+
+# ==========================================================================
+# LIGNE D'ÉTAT CONSOLE (auto-écrasée à chaque exécution d'une tâche)
+# ==========================================================================
+def make_scheduler_status_line(tasks):
+    """Construit le hook `on_complete` qui rafraîchit la LIGNE D'ÉTAT console.
+
+    À chaque fin d'exécution d'une tâche du planificateur, réaffiche (via
+    ``lib.log.status``, qui réécrit la ligne en place) la durée de la dernière
+    exécution de CHAQUE tâche, sous la forme :
+
+        [metrics-collector] 0.213s / [mirth-collector] 1.041s / [mirth-overview-collector] -----
+
+    Une tâche qui n'a pas encore tourné est affichée « ----- ». La sérialisation
+    (verrou) et la cohabitation avec les logs persistants sont gérées par
+    ``lib.log`` ; inactif hors terminal.
+    """
+    def render(_task=None):
+        parts = []
+        for t in tasks:
+            d = t.last_duration
+            parts.append(f"[{t.name}] {d:.3f}s" if d is not None
+                         else f"[{t.name}] -----")
+        log.status(" / ".join(parts))
+
+    return render
 
 
 # ==========================================================================
@@ -1783,7 +1810,7 @@ def main():
 
     # 1. Initialisation de la base
     database.init_db()
-    print(f"[checker_service] Base SQLite : {database.DEFAULT_DB_PATH}")
+    log.log(f"[checker_service] Base SQLite : {database.DEFAULT_DB_PATH}")
 
     # 1bis. Marqueurs d'interruption (arrêt logiciel / boot système) avant reprise
     mark_startup_events()
@@ -1796,8 +1823,13 @@ def main():
         RecurringTask(args.interval, scheduled_mirth_check, name="mirth-collector"),
         RecurringTask(args.interval, scheduled_mirth_overview, name="mirth-overview-collector"),
     ]
+    # Ligne d'état console auto-écrasée : durée de la dernière exécution de chaque
+    # tâche, rafraîchie à chaque fin d'exécution (hook on_complete partagé).
+    status_line = make_scheduler_status_line(tasks)
+    for t in tasks:
+        t.on_complete = status_line
     start_staggered(tasks, step=args.stagger)
-    print(f"[checker_service] {len(tasks)} tâches programmées démarrées "
+    log.log(f"[checker_service] {len(tasks)} tâches programmées démarrées "
           f"(toutes les {args.interval}s, décalage {args.stagger}s entre chacune).")
 
     # 3. Serveur web
@@ -1811,15 +1843,15 @@ def main():
         # même base en double (relevés trop fréquents/incohérents).
         for task in tasks:
             task.stop()
-        print(f"[checker_service] Impossible d'écouter sur {args.host}:{args.port} "
+        log.log(f"[checker_service] Impossible d'écouter sur {args.host}:{args.port} "
               f"— le port est déjà utilisé (une autre instance tourne ?). [{e}]")
         sys.exit(1)
 
     display_host = "localhost" if args.host in ("0.0.0.0", "") else args.host
     url = f"http://{display_host}:{args.port}/"
-    print(f"[checker_service] Serveur web : {url}")
-    print(f"[checker_service] Page statistiques : {url}statistiques.html")
-    print("[checker_service] Ctrl+C pour arrêter.")
+    log.log(f"[checker_service] Serveur web : {url}")
+    log.log(f"[checker_service] Page statistiques : {url}statistiques.html")
+    log.log("[checker_service] Ctrl+C pour arrêter.")
 
     if not args.no_browser:
         try:
@@ -1831,13 +1863,15 @@ def main():
     try:
         httpd.serve_forever()
     except KeyboardInterrupt:
-        print("\n[checker_service] Arrêt en cours...")
+        log.log("\n[checker_service] Arrêt en cours...")
     finally:
         for task in tasks:
             task.stop()
+        log.clear()   # plus de tâches : retire la ligne d'état flottante
         httpd.shutdown()
         httpd.server_close()
-        print("[checker_service] Arrêté.")
+        mirth_api.close_session()   # logout de la session Mirth durable partagée
+        log.log("[checker_service] Arrêté.")
 
 
 if __name__ == "__main__":

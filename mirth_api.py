@@ -41,10 +41,13 @@ import os
 import sys
 import ssl
 import json
+import socket
 import datetime
+import threading
 import importlib.util
 import urllib.parse
 import urllib.request
+import urllib.error
 import http.cookiejar
 
 # ==============================================================================
@@ -122,6 +125,9 @@ class MirthClient:
         self.password = password if password is not None else cfg["MIRTH_PASSWORD"]
         self.verify_ssl = cfg["MIRTH_VERIFY_SSL"] if verify_ssl is None else verify_ssl
         self.timeout = timeout
+        # Dernière version serveur lue (par ping/get_version) ; réutilisée pour
+        # éviter une requête /server/version redondante (cf. get_overview).
+        self.server_version = None
 
         # Contexte TLS : non vérifié par défaut (certificat auto-signé de Mirth).
         ctx = ssl.create_default_context()
@@ -136,10 +142,17 @@ class MirthClient:
         )
 
     # -- bas niveau ---------------------------------------------------------
-    def _request(self, path, data=None, accept="application/json"):
+    def _request(self, path, data=None, accept="application/json", _allow_relogin=True):
         """Requête HTTP. `data` (dict) => POST form-encoded, sinon GET.
 
         Retourne (status, body_text). Lève en cas d'erreur réseau/HTTP.
+
+        Auto-relogin : si la requête échoue sur une session devenue invalide
+        (401/403 par timeout d'inactivité, redémarrage de Mirth, ou coupure/reset
+        TCP), on se ré-authentifie une fois puis on rejoue la requête. Le login
+        passe lui-même `_allow_relogin=False` pour éviter toute récursion. Cet
+        appel se faisant déjà sous le verrou de session partagée, deux re-logins
+        concurrents sont impossibles.
         """
         url = self.base_url + path
         headers = {
@@ -154,9 +167,16 @@ class MirthClient:
         else:
             req = urllib.request.Request(url, headers=headers, method="GET")
 
-        with self._opener.open(req, timeout=self.timeout) as resp:
-            charset = resp.headers.get_content_charset() or "utf-8"
-            return resp.status, resp.read().decode(charset, errors="replace")
+        try:
+            with self._opener.open(req, timeout=self.timeout) as resp:
+                charset = resp.headers.get_content_charset() or "utf-8"
+                return resp.status, resp.read().decode(charset, errors="replace")
+        except Exception as e:
+            if _allow_relogin and _is_recoverable_error(e):
+                self.login()
+                return self._request(path, data=data, accept=accept,
+                                     _allow_relogin=False)
+            raise
 
     def _get_json(self, path):
         status, text = self._request(path, accept="application/json")
@@ -170,21 +190,45 @@ class MirthClient:
 
     # -- haut niveau --------------------------------------------------------
     def login(self):
-        """Ouvre une session (cookie JSESSIONID). Lève si l'authentification échoue."""
+        """(Ré)ouvre une session (cookie JSESSIONID). Lève si l'authentification échoue.
+
+        Un éventuel JSESSIONID périmé du CookieJar est remplacé par celui de la
+        réponse (même nom/domaine/chemin), ce qui permet de réutiliser le même
+        client à travers les re-logins.
+        """
         self._request("/users/_login",
-                      data={"username": self.user, "password": self.password})
+                      data={"username": self.user, "password": self.password},
+                      _allow_relogin=False)
 
     def logout(self):
         try:
-            self._request("/users/_logout", data={})
+            self._request("/users/_logout", data={}, _allow_relogin=False)
         except Exception:
             pass
 
+    def ping(self):
+        """Sonde légère validant la session (GET /server/version). LÈVE si le
+        serveur est injoignable. Mémorise au passage la version dans
+        `self.server_version` : cette sonde précédant chaque appel sur une session
+        réutilisée (cf. `_ensure_session`), la version est ainsi déjà disponible
+        sans nouvelle requête /server/version (cf. get_overview).
+
+        Sert à confirmer la joignabilité d'une session réutilisée : l'auto-relogin
+        de `_request` ré-authentifie de lui-même une session expirée (timeout
+        d'inactivité, redémarrage de Mirth, reset TCP) ; `ping` ne lève donc que
+        lorsque le serveur est réellement hors d'atteinte.
+        """
+        _status, text = self._request("/server/version", accept="text/plain")
+        self.server_version = text.strip() or None
+        return self.server_version
+
     def get_version(self):
-        """Version du serveur Mirth (chaîne), ou None."""
+        """Version du serveur Mirth (chaîne), ou None. Mémorise le résultat dans
+        `self.server_version`."""
         try:
             _status, text = self._request("/server/version", accept="text/plain")
-            return text.strip() or None
+            self.server_version = text.strip() or None
+            return self.server_version
         except Exception:
             return None
 
@@ -655,22 +699,95 @@ def _new_result(extra=None):
     return base
 
 
+# --------------------------------------------------------------------------
+# SESSION MIRTH DURABLE ET PARTAGÉE (collecteur de fond + routes web)
+# --------------------------------------------------------------------------
+# Un UNIQUE MirthClient (donc un seul JSESSIONID) est conservé entre les appels
+# et réutilisé par la tâche collecteur comme par les routes API. On évite ainsi
+# de repayer le coût d'authentification (lent sur le vrai serveur, ~7 s) à chaque
+# accès. La session est « paresseuse » : on ne (re)logue que si nécessaire, et
+# JAMAIS de logout() entre deux usages (cela invaliderait la session).
+#
+# Le CookieJar de `MirthClient` n'étant PAS thread-safe et les threads collecteur
+# (daemon) et serveur web (ThreadingHTTPServer) pouvant y accéder en parallèle,
+# tout accès — y compris le re-login — est sérialisé par `_SESSION_LOCK`.
+_SESSION_LOCK = threading.RLock()
+_shared_client = None
+
+
+def _is_recoverable_error(exc):
+    """True si l'erreur justifie une ré-authentification + 1 nouvelle tentative.
+
+    Couvre les trois façons dont une session devient invalide :
+      * timeout d'inactivité côté serveur -> 401/403 ;
+      * redémarrage de Mirth / coupure réseau / reset TCP -> erreur de connexion.
+    Un 500 (« serveur up mais en erreur ») n'est PAS rejouable.
+    """
+    if isinstance(exc, urllib.error.HTTPError):   # sous-classe de URLError : testé avant
+        return exc.code in (401, 403)
+    if isinstance(exc, urllib.error.URLError):
+        return True
+    if isinstance(exc, (socket.timeout, TimeoutError, ConnectionError)):
+        return True
+    return False
+
+
+def _ensure_session(timeout=8):
+    """Retourne le MirthClient partagé, connecté et VALIDÉ. LÈVE si injoignable.
+
+      * Aucune session ouverte  -> création + login.
+      * Session existante       -> validée par une sonde légère (`ping`) ;
+        l'auto-relogin de `_request` la ré-authentifie d'elle-même si elle a
+        expiré, si Mirth a redémarré, ou si la connexion TCP a été coupée.
+
+    À appeler sous `_SESSION_LOCK` (repris ici par sécurité — RLock réentrant).
+    """
+    global _shared_client
+    with _SESSION_LOCK:
+        client = _shared_client
+        if client is not None:
+            client.timeout = timeout
+            client.ping()                  # lève si le serveur est injoignable
+            return client
+        client = MirthClient(timeout=timeout)
+        client.login()                     # lève si injoignable / identifiants invalides
+        _shared_client = client
+        return client
+
+
+def close_session():
+    """Ferme proprement la session partagée (logout + oubli du client).
+
+    Optionnel — Mirth fait expirer ses sessions inactives de lui-même. Utile en
+    fin de programme (CLI one-shot, arrêt du service) pour ne pas laisser une
+    session pendante côté serveur.
+    """
+    global _shared_client
+    with _SESSION_LOCK:
+        if _shared_client is not None:
+            _shared_client.logout()
+            _shared_client = None
+
+
 def _with_client(func, timeout=8):
-    """Ouvre une session Mirth, exécute `func(client)`, ferme, sans jamais lever.
+    """Exécute `func(client)` sous la session Mirth durable et partagée, sans lever.
+
+    L'accès à la session est sérialisé par `_SESSION_LOCK` (le CookieJar n'est pas
+    thread-safe). La session est réutilisée d'un appel à l'autre et re-loguée
+    automatiquement si elle a expiré (cf. `_ensure_session` / l'auto-relogin de
+    `_request`). Aucun logout n'est fait ici.
 
     Retourne (data, error_message). `data` est None si la connexion a échoué.
     """
-    try:
-        client = MirthClient(timeout=timeout)
-        client.login()
-    except Exception as e:
-        return None, f"Connexion/authentification impossible : {e}"
-    try:
-        return func(client), None
-    except Exception as e:
-        return None, f"Erreur lors de la lecture des données : {e}"
-    finally:
-        client.logout()
+    with _SESSION_LOCK:
+        try:
+            client = _ensure_session(timeout=timeout)
+        except Exception as e:
+            return None, f"Connexion/authentification impossible : {e}"
+        try:
+            return func(client), None
+        except Exception as e:
+            return None, f"Erreur lors de la lecture des données : {e}"
 
 
 def get_overview(timeout=8):
@@ -687,7 +804,11 @@ def get_overview(timeout=8):
     })
 
     def _fetch(client):
-        version = client.get_version()
+        # `_ensure_session` vient de sonder /server/version (ping) sur une session
+        # réutilisée et en a mémorisé la version : on la réutilise au lieu de
+        # refaire la requête. Repli sur get_version() après un login frais (session
+        # neuve : ping non joué, donc server_version encore None).
+        version = client.server_version or client.get_version()
         system_stats = client.get_system_stats()
         system_info = client.get_system_info()
         channels = client.get_channels()
@@ -1022,8 +1143,13 @@ def build_full_report(include_messages=False, limit=50, timeout=8):
 # ==============================================================================
 
 if __name__ == "__main__":
+    import atexit
     import argparse
     from tabulate import tabulate
+
+    # CLI one-shot : on ferme la session durable à la sortie (quel que soit le
+    # chemin d'exit) pour ne pas laisser de session pendante sur le serveur.
+    atexit.register(close_session)
 
     def safe_print(text=""):
         """Affiche en gérant les terminaux Windows incapables d'encoder l'Unicode."""

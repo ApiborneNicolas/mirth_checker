@@ -26,38 +26,12 @@ Gain attendu : ~3,2 s → ~1,2 s.
 > login Mirth synchrone), cette route reste un instantané **live** psutil — il n'y
 > a pas d'optimisation possible côté DB, c'est psutil qui est lent sous Windows.
 
-## Session Mirth durable et partagée (collecteur + API)
+## ~~Session Mirth durable et partagée (collecteur + API)~~ — FAIT
 
-Aujourd'hui chaque accès Mirth refait un cycle **complet** `login() → requêtes →
-logout()` (`mirth_api._with_client`, `mirth_api.py:658`) : une session jetable par
-appel, donc le coût d'authentification (lent sur le vrai serveur, ~7 s) est payé à
-chaque fois.
-
-### Objectif
-
-Maintenir **au maximum une session Mirth durable** (un seul `MirthClient` /
-`JSESSIONID`, `mirth_api.py:114`) réutilisée :
-
-- par la **tâche collecteur** (`scheduled_mirth_overview`, toutes les minutes) ;
-- par les **routes API** qui auraient encore besoin d'un appel live (repli du
-  premier démarrage, sondes ponctuelles, etc.).
-
-On ne se reconnecte que **si nécessaire** : « session paresseuse » avec **re-login
-automatique + 1 retry** sur échec d'authentification (401/403) ou erreur de
-connexion — c'est ce qui couvre les **redémarrages de Mirth** et les coupures
-réseau (cf. les 3 cas : timeout d'inactivité, restart Mirth, reset TCP). Ne PAS
-faire `logout()` entre deux usages (cela invalide la session).
-
-### Contrainte de concurrence — IMPÉRATIF
-
-Le `MirthClient` / son `CookieJar` **n'est pas thread-safe**, et le collecteur
-(thread daemon) et les routes web (threads du `ThreadingHTTPServer`) peuvent y
-accéder en parallèle. Il faut donc **protéger la session par un mutex**
-(`threading.Lock`/`RLock`) : tout appel attend que la session soit **libre** avant
-de l'utiliser, exécute sa série de requêtes, puis relâche le verrou. Le re-login
-sur échec doit aussi se faire sous le même verrou (éviter deux re-logins
-concurrents).
-
-> Depuis le point 1, les routes web ne touchent plus Mirth (tout vient de SQLite) :
-> le collecteur est en pratique le seul consommateur réseau, ce qui rend ce
-> partage verrouillé d'autant plus simple à mettre en place proprement.
+Implémenté dans `mirth_api.py` : un unique `MirthClient` / `JSESSIONID` partagé
+(`_shared_client`) réutilisé par le collecteur et les routes web, sérialisé par
+`_SESSION_LOCK` (RLock). « Session paresseuse » via `_ensure_session()` (sonde
+`ping` validant une session réutilisée) + auto-relogin **+ 1 retry** dans
+`MirthClient._request` (couvre timeout d'inactivité, redémarrage Mirth, reset
+TCP — 401/403 ou erreur de connexion). Plus aucun `logout()` entre deux usages ;
+`close_session()` ferme proprement la session (arrêt du service / CLI one-shot).
