@@ -28,6 +28,7 @@ Points d'entrée haut niveau (ne lèvent jamais) :
     get_overview()             -> vue d'ensemble complète (serveur + canaux [+ connecteurs] + totaux)
     get_channels_overview()    -> liste des canaux et de leurs statistiques
     get_connectors_overview()  -> liste à plat des connecteurs (source + destinations)
+    get_connector_endpoints()  -> périphériques (hôte/port) des connecteurs réseau
     get_global_statistics()    -> statistiques agrégées (tous canaux confondus)
     get_server_info()          -> version, infos JVM/OS, statistiques système
     get_errors()               -> canaux en erreur (statistique ERROR > 0 ou état d'erreur)
@@ -323,6 +324,20 @@ class MirthClient:
             urllib.parse.quote(str(message_id), safe=""), query)
         try:
             return self._get_json(path)
+        except Exception:
+            return None
+
+    def get_channels_config_raw(self):
+        """Réponse brute de /channels (définitions COMPLÈTES des canaux), ou None.
+
+        Contrairement à /channels/statuses (statistiques temps réel), cet endpoint
+        renvoie la configuration : chaque canal porte son `sourceConnector` et ses
+        `destinationConnectors`, chaque connecteur son `transportName` (le « mode »)
+        et un bloc `properties` contenant l'IP/port pour les transports réseau.
+        Config peu changeante : une seule requête suffit.
+        """
+        try:
+            return self._get_json("/channels")
         except Exception:
             return None
 
@@ -689,6 +704,155 @@ def _parse_messages(data, channel_id=None, channel_name=None):
 
 
 # --------------------------------------------------------------------------
+# PARSING DÉFENSIF DE LA CONFIGURATION DES CONNECTEURS (GET /channels)
+# --------------------------------------------------------------------------
+# Adresses d'écoute « toutes interfaces » : un listener lié à 0.0.0.0/:: écoute
+# sur l'hôte du serveur Mirth lui-même ; on les conserve (host renseigné) mais on
+# les marque non-pingables (cibler le serveur relève des phases ultérieures).
+_LOCAL_BIND_HOSTS = {"0.0.0.0", "::", "0:0:0:0:0:0:0:0", "*"}
+
+
+def _coerce_port(value):
+    """Renvoie un port entier valide (1..65535), sinon None."""
+    p = _coerce_int(value)
+    return p if isinstance(p, int) and 0 < p < 65536 else None
+
+
+def _split_url(value):
+    """Si `value` ressemble à une URL (scheme://host[:port]/...), renvoie (host, port)."""
+    if not isinstance(value, str) or "://" not in value:
+        return None, None
+    try:
+        parsed = urllib.parse.urlparse(value.strip())
+        return parsed.hostname, parsed.port
+    except Exception:
+        return None, None
+
+
+def _looks_like_host(value):
+    """True si `value` ressemble à un hôte réseau (IP/nom) et non à un chemin local."""
+    if not isinstance(value, str):
+        return False
+    v = value.strip()
+    if not v or "://" in v:
+        return False
+    return not any(c in v for c in "\\/ ")
+
+
+def _extract_host_port(props):
+    """Extrait (host, port) du bloc `properties` d'un connecteur réseau.
+
+    Renvoie (None, None) pour un connecteur non réseau (fichier local, base de
+    données, JavaScript, canal/VM...). Défensif et tolérant inter-versions :
+
+      1. Sender TCP/MLLP/LLP (`*Dispatcher*`) : `remoteAddress` + `remotePort`.
+      2. Sender HTTP / Web Service : champ portant une URL complète
+         (`wsdlUrl`/`locationURI`/`host`/`url`/...) → `urllib.parse`.
+      3. Listener source (Receiver) : `listenerConnectorProperties.host` + `port`.
+      4. Repli générique : hôte simple **accompagné d'un port numérique** (DICOM
+         sender, autres versions). Le port obligatoire évite de prendre un chemin
+         de fichier local ou une URL JDBC pour un hôte réseau.
+    """
+    if not isinstance(props, dict):
+        return None, None
+
+    # 1. Sender TCP / MLLP : adresse + port distants.
+    host = props.get("remoteAddress")
+    if _looks_like_host(host):
+        return host.strip(), _coerce_port(props.get("remotePort"))
+
+    # 2. Sender HTTP / Web Service : champ portant une URL complète.
+    for key in ("wsdlUrl", "locationURI", "host", "url", "uri", "address"):
+        u_host, u_port = _split_url(props.get(key))
+        if u_host:
+            return u_host, u_port
+
+    # 3. Listener (source) : adresse/port d'écoute.
+    lcp = props.get("listenerConnectorProperties")
+    if isinstance(lcp, dict) and isinstance(lcp.get("host"), str) and lcp["host"]:
+        return lcp["host"].strip(), _coerce_port(lcp.get("port"))
+
+    # 4. Repli générique : hôte simple + port numérique obligatoire.
+    for hk in ("host", "address", "serverAddress", "remoteAddress"):
+        h = props.get(hk)
+        if _looks_like_host(h):
+            for pk in ("port", "remotePort", "serverPort"):
+                p = _coerce_port(props.get(pk))
+                if p is not None:
+                    return h.strip(), p
+    return None, None
+
+
+def _connector_endpoint(channel_id, channel_name, connector, role):
+    """Transforme un connecteur de config en endpoint normalisé, ou None."""
+    if not isinstance(connector, dict):
+        return None
+    props = connector.get("properties")
+    host, port = _extract_host_port(props if isinstance(props, dict) else {})
+    pingable = bool(host) and str(host) not in _LOCAL_BIND_HOSTS
+    if host:
+        address = "%s:%s" % (host, port) if port is not None else str(host)
+    else:
+        address = None
+    return {
+        "channel_id": channel_id,
+        "channel_name": channel_name,
+        "meta_data_id": _coerce_int(connector.get("metaDataId")),
+        "name": connector.get("name"),
+        "role": role,                                   # "source" | "destination"
+        "transport": connector.get("transportName"),
+        "kind": "réseau" if host else "non-réseau",
+        "host": host,
+        "port": port,
+        "address": address,
+        "pingable": pingable,
+        "enabled": _as_bool(connector.get("enabled"), default=True),
+    }
+
+
+def _parse_channel_endpoints(channel):
+    """Endpoints (source + destinations) d'une définition de canal (GET /channels)."""
+    if not isinstance(channel, dict):
+        return []
+    channel_id = channel.get("id") or channel.get("channelId")
+    channel_name = channel.get("name")
+
+    endpoints = []
+    ep = _connector_endpoint(channel_id, channel_name,
+                             channel.get("sourceConnector"), "source")
+    if ep:
+        endpoints.append(ep)
+
+    dest = channel.get("destinationConnectors")
+    if isinstance(dest, dict):
+        destinations = _as_list(dest.get("connector"))
+    else:
+        destinations = _as_list(dest)
+    for d in destinations:
+        ep = _connector_endpoint(channel_id, channel_name, d, "destination")
+        if ep:
+            endpoints.append(ep)
+    return endpoints
+
+
+def _parse_channels_config(data):
+    """Liste à plat des endpoints de tous les canaux à partir de /channels brut."""
+    if isinstance(data, dict):
+        container = data.get("list", data)
+        if isinstance(container, dict):
+            channels = _as_list(container.get("channel"))
+        else:
+            channels = _as_list(container)
+    else:
+        channels = _as_list(data)
+
+    endpoints = []
+    for ch in channels:
+        endpoints.extend(_parse_channel_endpoints(ch))
+    return endpoints
+
+
+# --------------------------------------------------------------------------
 # POINTS D'ENTRÉE HAUT NIVEAU (ne lèvent jamais)
 # --------------------------------------------------------------------------
 def _new_result(extra=None):
@@ -1028,6 +1192,32 @@ def get_connectors_overview(channel_id=None, timeout=8):
     return result
 
 
+def get_connector_endpoints(timeout=8):
+    """Liste les périphériques (hôtes/ports) configurés sur les connecteurs.
+
+    Lit la configuration des canaux (GET /channels) et en extrait, pour chaque
+    connecteur source/destination, l'hôte et le port distants quand le transport
+    est réseau (TCP/MLLP, HTTP/WS, DICOM...). Les connecteurs non réseau
+    (fichier, base, JavaScript, canal) sont renvoyés avec `kind="non-réseau"` et
+    `pingable=False`. Point d'entrée des phases de supervision ; ne lève jamais.
+
+    Champs : reachable, error, base_url, count, endpoints[{channel_id,
+    channel_name, meta_data_id, name, role, transport, kind, host, port, address,
+    pingable, enabled}].
+    """
+    result = _new_result({"endpoints": [], "count": 0})
+    data, error = _with_client(
+        lambda c: _parse_channels_config(c.get_channels_config_raw()),
+        timeout=timeout)
+    if data is None:
+        result["error"] = error
+        return result
+    result["endpoints"] = data
+    result["count"] = len(data)
+    result["reachable"] = True
+    return result
+
+
 def list_error_message_keys(channel_id=None, limit=50, timeout=8):
     """Liste LÉGÈRE (sans contenu) des messages en erreur — liste autoritaire.
 
@@ -1102,9 +1292,10 @@ def build_full_report(include_messages=False, limit=50, timeout=8):
     """Rapport détaillé complet de l'état Mirth (JSON-friendly). Ne lève jamais.
 
     Rassemble en une structure unique : serveur (version + JVM/OS + stats système),
-    totaux globaux, canaux **avec leurs connecteurs**, canaux en erreur, et — sur
-    demande (`include_messages`) — les messages en erreur. Source commune du
-    rapport CLI exhaustif (`--full`) et de la route /api/mirth/report.
+    totaux globaux, canaux **avec leurs connecteurs**, **périphériques** (endpoints
+    réseau des connecteurs), canaux en erreur, et — sur demande (`include_messages`)
+    — les messages en erreur. Source commune du rapport CLI exhaustif (`--full`) et
+    de la route /api/mirth/report.
     """
     ov = get_overview(timeout=timeout)
     report = {
@@ -1119,6 +1310,7 @@ def build_full_report(include_messages=False, limit=50, timeout=8):
         "channels_started": ov.get("channels_started"),
         "totals": ov.get("totals"),
         "channels": ov.get("channels", []),
+        "endpoints": [],
         "errors": [],
         "messages": [],
     }
@@ -1131,6 +1323,9 @@ def build_full_report(include_messages=False, limit=50, timeout=8):
               or (c.get("state") or "").upper() in ("ERROR", "PAUSED")]
     faulty.sort(key=lambda c: (c.get("error") or 0), reverse=True)
     report["errors"] = faulty
+
+    # Périphériques : endpoints réseau des connecteurs (une requête /channels).
+    report["endpoints"] = get_connector_endpoints(timeout=timeout).get("endpoints", [])
 
     if include_messages:
         msgs = get_error_messages(limit=limit, timeout=timeout)
@@ -1184,7 +1379,7 @@ if __name__ == "__main__":
                         help="Délai d'attente réseau en secondes (def: 8)")
     parser.add_argument("-s", "--sections", type=str, default="all",
                         help="Sections à afficher, séparées par des virgules : "
-                             "server,channels,connectors,stats,errors (def: all)")
+                             "server,channels,connectors,endpoints,stats,errors (def: all)")
     parser.add_argument("-c", "--channel", type=str, default=None,
                         help="Filtre : n'affiche que les canaux dont le nom "
                              "contient ce texte (insensible à la casse)")
@@ -1223,10 +1418,11 @@ if __name__ == "__main__":
 
     wanted = [s.strip().lower() for s in args.sections.split(",") if s.strip()]
     if "all" in wanted or not wanted:
-        wanted = ["server", "channels", "connectors", "stats", "errors"]
+        wanted = ["server", "channels", "connectors", "endpoints", "stats", "errors"]
     # --full ajoute le détail (lourd) des messages en erreur aux sections de base.
     if args.full:
-        wanted = ["server", "channels", "connectors", "stats", "errors", "messages"]
+        wanted = ["server", "channels", "connectors", "endpoints", "stats",
+                  "errors", "messages"]
 
     # Une seule session : on récupère tout via get_overview.
     ov = get_overview(timeout=args.timeout)
@@ -1307,6 +1503,24 @@ if __name__ == "__main__":
                                         "Erreurs"])
         else:
             safe_print("Aucun connecteur exposé par le serveur.")
+
+    if "endpoints" in wanted:
+        display_header("PÉRIPHÉRIQUES (ENDPOINTS DES CONNECTEURS)")
+        eps = get_connector_endpoints(timeout=args.timeout).get("endpoints", [])
+        if args.channel:
+            flt = args.channel.lower()
+            eps = [e for e in eps if flt in (e.get("channel_name") or "").lower()]
+        if eps:
+            table = [[fmt(e.get("channel_name")), fmt(e.get("name")),
+                      "Source" if e.get("role") == "source" else "Destination",
+                      fmt(e.get("transport")), fmt(e.get("host")), fmt(e.get("port")),
+                      "Oui" if e.get("pingable") else "Non"] for e in eps]
+            print_table(table, headers=["Canal", "Connecteur", "Rôle", "Transport",
+                                        "Hôte", "Port", "Pingable"])
+            net = sum(1 for e in eps if e.get("pingable"))
+            safe_print(f"\n{len(eps)} connecteur(s), dont {net} pingable(s).")
+        else:
+            safe_print("Aucun endpoint détecté (serveur sans canaux ?).")
 
     if "errors" in wanted:
         display_header("CANAUX EN ERREUR")

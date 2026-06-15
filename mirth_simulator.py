@@ -19,7 +19,10 @@ Fonctionnement
 --------------
   * Au démarrage, on crée `--channels` canaux nommés « Simul_Client_X ». Chaque
     canal possède deux sous-canaux (connecteurs) : un *IN* (Source) et un *OUT*
-    (Destination), par lesquels transitent les données.
+    (Destination), par lesquels transitent les données. Chaque canal reçoit en plus
+    un *profil de connecteurs* (transport + IP/port) cyclique : MLLP/TCP, HTTP,
+    DICOM, puis un cas non réseau (base -> fichier). Ces définitions sont exposées
+    via `GET /channels` pour alimenter la supervision des périphériques.
   * Des données aléatoires d'initialisation sont injectées (`--ok` messages OK et
     `--errors` messages en erreur répartis au hasard).
   * Un serveur HTTPS (certificat auto-signé embarqué, comme Mirth) est ouvert sur
@@ -38,7 +41,8 @@ Commandes clavier (dans la fenêtre du simulateur)
   q     -> quitte
 
 Une fois lancé, `python mirth_api.py` doit pouvoir récupérer canaux,
-statistiques et messages en erreur via le protocole déjà en place.
+statistiques, messages en erreur et configuration des connecteurs (endpoints)
+via le protocole déjà en place.
 """
 
 import os
@@ -211,23 +215,97 @@ _ERROR_TEMPLATES = [
 ]
 
 
-def _new_connector(name, meta_data_id, kind):
+# ------------------------------------------------------------------------------
+# PROFILS DE CONNECTEURS (configuration exposée par GET /channels)
+# ------------------------------------------------------------------------------
+# Pour fournir des données de test au parseur d'endpoints de `mirth_api.py`, chaque
+# canal reçoit un profil source/destination décrivant un `transportName` et un bloc
+# `properties` au format Mirth (avec le `@class` réel du connecteur). Les profils
+# couvrent les principaux cas réseau (TCP/MLLP, HTTP, DICOM) **et** un cas non
+# réseau (lecteur base -> écriture fichier) pour vérifier le marquage « non-pingable ».
+def _src_tcp(port):
+    return {"transport": "TCP Listener", "properties": {
+        "@class": "com.mirth.connect.connectors.tcp.TcpReceiverProperties",
+        "listenerConnectorProperties": {"host": "0.0.0.0", "port": str(port)}}}
+
+
+def _dst_tcp(host, port):
+    return {"transport": "TCP Sender", "properties": {
+        "@class": "com.mirth.connect.connectors.tcp.TcpDispatcherProperties",
+        "remoteAddress": host, "remotePort": str(port)}}
+
+
+def _src_http(port):
+    return {"transport": "HTTP Listener", "properties": {
+        "@class": "com.mirth.connect.connectors.http.HttpReceiverProperties",
+        "listenerConnectorProperties": {"host": "0.0.0.0", "port": str(port)}}}
+
+
+def _dst_http(url):
+    # Le connecteur HTTP Sender de Mirth stocke l'URL cible dans `host`.
+    return {"transport": "HTTP Sender", "properties": {
+        "@class": "com.mirth.connect.connectors.http.HttpDispatcherProperties",
+        "host": url}}
+
+
+def _src_dicom(port):
+    return {"transport": "DICOM Listener", "properties": {
+        "@class": "com.mirth.connect.connectors.dimse.DICOMReceiverProperties",
+        "listenerConnectorProperties": {"host": "0.0.0.0", "port": str(port)}}}
+
+
+def _dst_dicom(host, port):
+    return {"transport": "DICOM Sender", "properties": {
+        "@class": "com.mirth.connect.connectors.dimse.DICOMDispatcherProperties",
+        "host": host, "port": str(port)}}
+
+
+def _src_db():
+    return {"transport": "Database Reader", "properties": {
+        "@class": "com.mirth.connect.connectors.jdbc.DatabaseReceiverProperties",
+        "driver": "org.postgresql.Driver",
+        "url": "jdbc:postgresql://dbserver.local:5432/hl7"}}
+
+
+def _dst_file():
+    # Schéma FILE = chemin local -> non réseau (host n'est pas une adresse).
+    return {"transport": "File Writer", "properties": {
+        "@class": "com.mirth.connect.connectors.file.FileDispatcherProperties",
+        "scheme": "FILE", "host": "C:\\Mirth\\out"}}
+
+
+# Profils assignés cycliquement aux canaux (1->MLLP, 2->HTTP, 3->DICOM, 4->local).
+# La destination du profil 1 vise 127.0.0.1:8443 (port local de Mirth / du
+# simulateur) : ce port étant ouvert quand le serveur tourne, ce périphérique
+# apparaît « en ligne » dans la modale de connectivité, tandis que les IP privées
+# 192.168.50.x (injoignables) illustrent l'état « hors ligne ».
+_CONNECTOR_PROFILES = [
+    {"source": _src_tcp(6661),    "dest": _dst_tcp("127.0.0.1", 8443)},
+    {"source": _src_http(8081),   "dest": _dst_http("http://192.168.50.20:8080/api/hl7")},
+    {"source": _src_dicom(11112), "dest": _dst_dicom("192.168.50.30", 104)},
+    {"source": _src_db(),         "dest": _dst_file()},
+]
+
+
+def _new_connector(name, meta_data_id, kind, config=None):
     return {
         "name": name,
         "metaDataId": meta_data_id,
         "kind": kind,  # "in" ou "out"
         "stats": {k: 0 for k in _STAT_KEYS},
+        "config": config or {},  # {transport, properties} exposé par GET /channels
     }
 
 
 def _new_channel(index):
+    profile = _CONNECTOR_PROFILES[(index - 1) % len(_CONNECTOR_PROFILES)]
     return {
         "channel_id": str(uuid.uuid4()),
         "name": f"Simul_Client_{index}",
         "state": "STARTED",
         "connectors": [
-            _new_connector(IN_NAME, 0, "in"),
-            _new_connector(OUT_NAME, 1, "out"),
+            _new_connector(IN_NAME, 0, "in", config=profile["source"]),
+            _new_connector(OUT_NAME, 1, "out", config=profile["dest"]),
         ],
         "messages": [],  # messages en erreur conservés pour récupération
     }
@@ -317,6 +395,39 @@ def channel_stats(channel):
     return agg
 
 
+def _sim_host_port(props):
+    """Extrait (host, port) d'un bloc properties — version locale pour l'affichage.
+
+    Reproduit, en plus simple, la logique du parseur de `mirth_api.py` sur les
+    formes de properties que ce simulateur produit (sender remoteAddress/remotePort,
+    URL HTTP dans `host`, listener `listenerConnectorProperties`, DICOM host/port).
+    """
+    if not isinstance(props, dict):
+        return None, None
+    if props.get("remoteAddress"):
+        return props["remoteAddress"], props.get("remotePort")
+    host = props.get("host")
+    if isinstance(host, str) and "://" in host:
+        parsed = urllib.parse.urlparse(host)
+        return parsed.hostname, parsed.port
+    lcp = props.get("listenerConnectorProperties")
+    if isinstance(lcp, dict) and lcp.get("host"):
+        return lcp["host"], lcp.get("port")
+    if isinstance(host, str) and host and "\\" not in host and props.get("port"):
+        return host, props.get("port")
+    return None, None
+
+
+def _endpoint_label(connector):
+    """Libellé compact « Transport host:port » (ou « non-réseau ») pour la console."""
+    cfg = connector.get("config") or {}
+    transport = cfg.get("transport") or "?"
+    host, port = _sim_host_port(cfg.get("properties") or {})
+    if host:
+        return "%s %s:%s" % (transport, host, port if port is not None else "?")
+    return "%s (non-réseau)" % transport
+
+
 # ==============================================================================
 # DUMP / LOAD DE LA MÉMOIRE
 # ==============================================================================
@@ -400,6 +511,40 @@ def json_channel_statistics():
                 "error": s["ERROR"],
             })
     return {"list": {"channelStatistics": items}}
+
+
+def _connector_config_json(connector):
+    """Sérialise un connecteur au format GET /channels (config, pas statistiques)."""
+    cfg = connector.get("config") or {}
+    return {
+        "metaDataId": connector["metaDataId"],
+        "name": connector["name"],
+        "transportName": cfg.get("transport", "JavaScript Reader"),
+        "enabled": True,
+        "properties": cfg.get("properties", {}),
+    }
+
+
+def _channel_config_json(channel):
+    """Définition complète d'un canal (source + destinations) façon GET /channels."""
+    conns = channel["connectors"]
+    source = next((c for c in conns if c["kind"] == "in"), conns[0])
+    dests = [c for c in conns if c["kind"] != "in"]
+    return {
+        "id": channel["channel_id"],
+        "name": channel["name"],
+        "sourceConnector": _connector_config_json(source),
+        "destinationConnectors": {
+            "connector": [_connector_config_json(c) for c in dests]
+        },
+    }
+
+
+def json_channels_config():
+    """Endpoint /channels : définitions complètes (config) de tous les canaux."""
+    with STATE_LOCK:
+        return {"list": {"channel": [
+            _channel_config_json(c) for c in STATE["channels"]]}}
 
 
 def _message_json(msg):
@@ -597,6 +742,10 @@ class MirthSimHandler(BaseHTTPRequestHandler):
         if path == "/channels/statistics":
             self._send_json(json_channel_statistics())
             return
+        # Définitions complètes (config) : source/destinations + transport + IP/port.
+        if path == "/channels":
+            self._send_json(json_channels_config())
+            return
 
         m = re.match(r"^/channels/([^/]+)/messages$", path)
         if m:
@@ -745,9 +894,9 @@ def render_screen(base_url, banner=True):
             for conn in ch["connectors"]:
                 s = conn["stats"]
                 tag = "IN " if conn["kind"] == "in" else "OUT"
-                _safe_print("       %s %-14s  reçus=%-4d envoyés=%-4d erreurs=%-4d"
-                            % (tag, "(%s)" % conn["name"], s["RECEIVED"],
-                               s["SENT"], s["ERROR"]))
+                _safe_print("       %s %-14s %-30s reçus=%-4d envoyés=%-4d erreurs=%-4d"
+                            % (tag, "(%s)" % conn["name"], _endpoint_label(conn),
+                               s["RECEIVED"], s["SENT"], s["ERROR"]))
 
     _safe_print("-" * 78)
     _safe_print(" TOTAL  reçus=%d  filtrés=%d  envoyés=%d  ERREURS=%d"

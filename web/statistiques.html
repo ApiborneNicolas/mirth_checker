@@ -122,6 +122,12 @@
             font-size: 12px; line-height: 1.5; color: #7dd3fc; max-height: 240px;
             overflow: auto; white-space: pre-wrap; word-break: break-word;
         }
+
+        /* Modale « Connectivité des périphériques » : tableau scrollable */
+        #devices-modal .modal-body { padding: 0; }
+        .devices-list { max-height: calc(100vh - 200px); overflow: auto; padding: 14px 20px; }
+        .devices-list .mtable { width: 100%; }
+        .devices-list tr.offnet td { opacity: .55; }   /* connecteurs non réseau grisés */
     </style>
 </head>
 <body>
@@ -212,6 +218,26 @@
         </div>
     </div>
 
+    <!-- ============ MODALE : CONNECTIVITÉ DES PÉRIPHÉRIQUES (ping + port TCP) ============ -->
+    <div class="modal-overlay" id="devices-modal">
+        <div class="modal wide" role="dialog" aria-modal="true" aria-labelledby="devices-modal-title">
+            <div class="modal-head">
+                <h2 id="devices-modal-title">🛰️ Connectivité des périphériques</h2>
+                <button class="modal-close" id="closeDevices" title="Fermer">✕</button>
+            </div>
+            <div class="modal-body">
+                <div class="errors-toolbar">
+                    <span id="devices-summary">Chargement…</span>
+                    <input id="devices-filter" type="text" placeholder="Filtrer (canal, hôte, transport…)"
+                           style="margin-left:auto;max-width:240px" title="Filtrer la liste">
+                    <button id="devices-rescan" title="Relire la configuration des connecteurs (sans tester)">⟳ Rescanner</button>
+                    <button id="devices-reload" title="Relancer le test ICMP + port TCP">↻ Tester</button>
+                </div>
+                <div class="devices-list" id="devices-list"></div>
+            </div>
+        </div>
+    </div>
+
     <div class="sysinfo" id="sysinfo">
         <span title="Nom de la machine">🖥 Hôte : <b id="si-host">—</b></span>
         <span title="Démarrage du système">⏻ Démarré le <b id="si-boot">—</b></span>
@@ -271,7 +297,11 @@
     </div>
 
     <div class="chart-panel" id="channels-panel">
-        <div class="panel-title">📡 Canaux Mirth (API REST)</div>
+        <div class="panel-title" style="display:flex;align-items:center;gap:10px">
+            <span>📡 Canaux Mirth (API REST)</span>
+            <button id="openDevices" style="margin-left:auto"
+                    title="Vérifier la connectivité réseau des connecteurs (ping ICMP + port TCP)">🛰️ Connectivité</button>
+        </div>
         <table class="mtable" id="channels-table">
             <thead>
                 <tr>
@@ -1449,6 +1479,106 @@ document.getElementById("closeErrors").addEventListener("click", closeErrorsModa
 document.getElementById("errors-reload").addEventListener("click", fetchErrorMessages);
 document.getElementById("errors-modal").addEventListener("click", e => {
     if (e.target.id === "errors-modal") closeErrorsModal();   // clic sur le fond
+});
+
+// ============ MODALE : CONNECTIVITÉ DES PÉRIPHÉRIQUES (ping ICMP + port TCP) ============
+// Dernier balayage en mémoire (sert au filtre client sans re-sonder le réseau).
+let devicesData = [];
+
+function openDevicesModal() {
+    document.getElementById("devices-modal").classList.add("open");
+    document.getElementById("devices-filter").value = "";
+    probeDevices(false);   // ouvre directement sur un test de connectivité
+}
+function closeDevicesModal() { document.getElementById("devices-modal").classList.remove("open"); }
+
+// rescanOnly=true : relit la config (rapide, sans ping/port) ; false : balayage complet.
+async function probeDevices(rescanOnly) {
+    const list = document.getElementById("devices-list");
+    const summary = document.getElementById("devices-summary");
+    summary.textContent = rescanOnly ? "Lecture de la configuration…"
+                                     : "Test de connectivité (ICMP + port TCP)…";
+    list.innerHTML = '<div style="display:flex;justify-content:center;padding:40px"><div class="spinner"></div></div>';
+    const url = rescanOnly ? `${API}/api/mirth/endpoints` : `${API}/api/devices/probe`;
+    try {
+        const r = await fetch(url);
+        const d = await r.json();
+        if (!d.reachable) {
+            devicesData = [];
+            summary.textContent = "API Mirth injoignable.";
+            list.innerHTML = `<div class="muted-note">${escapeHtml(d.error || "Serveur Mirth injoignable.")}</div>`;
+            return;
+        }
+        devicesData = d.devices || d.endpoints || [];
+        if (rescanOnly) {
+            summary.textContent = `${devicesData.length} connecteur(s) — configuration relue ` +
+                `(cliquez « Tester » pour vérifier la connectivité).`;
+        } else {
+            summary.textContent = `${d.online || 0} en ligne · ${d.offline || 0} hors ligne · ` +
+                `${d.untested || 0} non testé(s)` + (d.probed_at ? ` — ${d.probed_at}` : "");
+        }
+        drawDevicesTable();
+    } catch (e) {
+        devicesData = [];
+        summary.textContent = "Erreur de requête.";
+        list.innerHTML = `<div class="muted-note">${escapeHtml(e.message)}</div>`;
+    }
+}
+
+function devIcmpCell(dev) {
+    if (!dev.pingable || !dev.tested) return '<span class="muted">—</span>';
+    if (dev.icmp_ok) return `<span class="badge on">${escapeHtml(dev.icmp_ms)} ms</span>`;
+    return '<span class="badge off">✗</span>';
+}
+function devTcpCell(dev) {
+    if (dev.port == null || !dev.tested || dev.tcp_ok == null) return '<span class="muted">—</span>';
+    return dev.tcp_ok
+        ? `<span class="badge on">ouvert${dev.tcp_ms != null ? " " + escapeHtml(dev.tcp_ms) + " ms" : ""}</span>`
+        : '<span class="badge off">fermé</span>';
+}
+function devStateCell(dev) {
+    if (!dev.pingable) return '<span class="badge idle">non-réseau</span>';
+    if (!dev.tested) return '<span class="badge idle">non testé</span>';
+    return dev.reachable ? '<span class="badge on">● en ligne</span>'
+                         : '<span class="badge off">● hors ligne</span>';
+}
+
+function drawDevicesTable() {
+    const list = document.getElementById("devices-list");
+    const flt = (document.getElementById("devices-filter").value || "").trim().toLowerCase();
+    const rows = devicesData.filter(dev => !flt ||
+        [dev.channel_name, dev.name, dev.transport, dev.host, dev.address]
+            .some(v => (v || "").toString().toLowerCase().includes(flt)));
+    if (!rows.length) {
+        list.innerHTML = '<div class="muted-note">Aucun périphérique ne correspond.</div>';
+        return;
+    }
+    const body = rows.map(dev => {
+        const role = dev.role === "source" ? "Source" : "Destination";
+        return `<tr class="${dev.pingable ? "" : "offnet"}">
+            <td>${escapeHtml(dev.channel_name || "—")}</td>
+            <td>${escapeHtml(dev.name || "—")} <span class="conn-role">${role}</span></td>
+            <td>${escapeHtml(dev.transport || "—")}</td>
+            <td>${escapeHtml(dev.host || "—")}</td>
+            <td class="num">${dev.port != null ? escapeHtml(dev.port) : "—"}</td>
+            <td>${devIcmpCell(dev)}</td>
+            <td>${devTcpCell(dev)}</td>
+            <td>${devStateCell(dev)}</td>
+        </tr>`;
+    }).join("");
+    list.innerHTML = `<table class="mtable"><thead><tr>
+        <th>Canal</th><th>Connecteur</th><th>Mode</th><th>Hôte</th>
+        <th class="num">Port</th><th>ICMP</th><th>Port TCP</th><th>État</th>
+        </tr></thead><tbody>${body}</tbody></table>`;
+}
+
+document.getElementById("openDevices").addEventListener("click", openDevicesModal);
+document.getElementById("closeDevices").addEventListener("click", closeDevicesModal);
+document.getElementById("devices-reload").addEventListener("click", () => probeDevices(false));
+document.getElementById("devices-rescan").addEventListener("click", () => probeDevices(true));
+document.getElementById("devices-filter").addEventListener("input", drawDevicesTable);
+document.getElementById("devices-modal").addEventListener("click", e => {
+    if (e.target.id === "devices-modal") closeDevicesModal();   // clic sur le fond
 });
 
 document.getElementById("refresh").addEventListener("click", loadFull);

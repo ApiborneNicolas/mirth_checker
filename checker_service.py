@@ -1916,6 +1916,95 @@ def make_api_status(tasks, started_at):
 # ==========================================================================
 # CONSTRUCTION DES ROUTES
 # ==========================================================================
+# ==========================================================================
+# API : SUPERVISION DES PÉRIPHÉRIQUES (connectivité ICMP + port TCP, à la demande)
+# ==========================================================================
+def probe_endpoints(endpoints, tcp_timeout=2.0):
+    """Teste la connectivité d'une liste d'endpoints (cf. mirth_api.get_connector_endpoints).
+
+    Pour chaque connecteur réseau « pingable » (sender vers un hôte distant) :
+      * ICMP via system_state.run_ping (indicatif, souvent filtré par les pare-feux) ;
+      * test du port TCP via system_state.check_tcp_port (signal fiable applicatif).
+    L'`État` global (`reachable`) est piloté par le port TCP quand un port est connu,
+    sinon par l'ICMP. Les connecteurs non réseau / en écoute locale (0.0.0.0) ne sont
+    pas testés (`reachable=None`, `tested=False`). Les hôtes et couples (host, port)
+    sont dédupliqués : un même équipement visé par plusieurs connecteurs n'est sondé
+    qu'une fois. Fonction PURE : ne lit ni n'écrit la base (la persistance arrive en
+    phase 3) et ne lève jamais.
+    """
+    ping_cache, tcp_cache = {}, {}
+
+    def _ping(host):
+        if host not in ping_cache:
+            try:
+                v = system_state.run_ping(host)   # ms, None (timeout) ou False (inconnu)
+            except Exception:
+                v = None
+            ping_cache[host] = v if isinstance(v, (int, float)) else None
+        return ping_cache[host]
+
+    def _tcp(host, port):
+        key = (host, port)
+        if key not in tcp_cache:
+            try:
+                tcp_cache[key] = system_state.check_tcp_port(host, port, timeout=tcp_timeout)
+            except Exception:
+                tcp_cache[key] = None
+        return tcp_cache[key]
+
+    results = []
+    for ep in endpoints:
+        row = dict(ep)
+        if not ep.get("pingable"):
+            row.update({"icmp_ok": None, "icmp_ms": None, "tcp_ok": None,
+                        "tcp_ms": None, "reachable": None, "tested": False})
+            results.append(row)
+            continue
+        host, port = ep.get("host"), ep.get("port")
+        icmp_ms = _ping(host)
+        icmp_ok = icmp_ms is not None
+        if port is not None:
+            tcp_ms = _tcp(host, port)
+            tcp_ok = tcp_ms is not None
+            reachable = tcp_ok
+        else:
+            tcp_ms, tcp_ok = None, None
+            reachable = icmp_ok
+        row.update({"icmp_ok": icmp_ok, "icmp_ms": icmp_ms, "tcp_ok": tcp_ok,
+                    "tcp_ms": tcp_ms, "reachable": reachable, "tested": True})
+        results.append(row)
+    return results
+
+
+def api_mirth_endpoints(req):
+    """Liste live des périphériques (endpoints réseau) déduits de la config Mirth.
+
+    Lit GET /channels (via mirth_api.get_connector_endpoints) — sert à (re)scanner la
+    configuration sans lancer de test de connectivité. Ne sonde rien.
+    """
+    return mirth_api.get_connector_endpoints(timeout=_mirth_timeout(req))
+
+
+def api_devices_probe(req):
+    """Balayage live de connectivité : endpoints + ICMP + port TCP (« Tester maintenant »).
+
+    Récupère les endpoints (config Mirth) puis lance `probe_endpoints`. En phase 2,
+    aucune persistance : on renvoie les résultats frais. Si Mirth est injoignable, on
+    relaie tel quel le diagnostic de l'API.
+    """
+    ov = mirth_api.get_connector_endpoints(timeout=_mirth_timeout(req))
+    if not ov.get("reachable"):
+        return ov
+    devices = probe_endpoints(ov.get("endpoints", []))
+    online = sum(1 for d in devices if d.get("reachable") is True)
+    offline = sum(1 for d in devices if d.get("reachable") is False)
+    untested = sum(1 for d in devices if d.get("reachable") is None)
+    return {"reachable": True, "base_url": ov.get("base_url"),
+            "count": len(devices), "online": online, "offline": offline,
+            "untested": untested, "devices": devices,
+            "probed_at": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")}
+
+
 def build_router(tasks, started_at):
     router = webserver.Router(static_dir=WEB_DIR, index_route="/",
                               json_transform=_round_floats)
@@ -1967,6 +2056,8 @@ def build_router(tasks, started_at):
     router.get("/api/mirth/errors", api_mirth_errors)
     router.get("/api/mirth/messages", api_mirth_messages)
     router.get("/api/mirth/process", api_mirth_process)
+    router.get("/api/mirth/endpoints", api_mirth_endpoints)
+    router.get("/api/devices/probe", api_devices_probe)
     router.get("/api/getmirthinfo", api_getmirthinfo)
 
     # API email

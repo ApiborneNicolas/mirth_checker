@@ -321,6 +321,31 @@ def get_vpn_interfaces() -> list:
 def run_ping(ip: str) -> float:
     return ping(ip, unit='ms')
 
+def check_tcp_port(host: str, port: int, timeout: float = 2.0):
+    """Teste l'ouverture d'un port TCP : tente une connexion à host:port.
+
+    Renvoie la latence d'établissement de la connexion en millisecondes (float) si
+    le port accepte la connexion, sinon None (port fermé, hôte injoignable, délai
+    dépassé). Ne lève jamais. Signal fiable de joignabilité applicative, plus
+    robuste que l'ICMP (souvent filtré par les pare-feux Windows). Style aligné
+    sur run_ping (latence en ms ou rien)."""
+    if not host or port is None:
+        return None
+    try:
+        port = int(port)
+    except (TypeError, ValueError):
+        return None
+    if not (0 < port < 65536):
+        return None
+    start = datetime.datetime.now()
+    try:
+        with socket.create_connection((host, port), timeout=timeout):
+            pass
+    except OSError:
+        return None
+    elapsed = (datetime.datetime.now() - start).total_seconds() * 1000.0
+    return round(elapsed, 2)
+
 def get_system_counts() -> dict:
     """Retourne le nombre total de processus, de threads et de handles sur le système"""
     num_processes = 0
