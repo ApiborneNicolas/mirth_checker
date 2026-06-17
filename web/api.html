@@ -273,7 +273,31 @@ const ENDPOINTS = [
       ] },
     { id: "/api/mirth/process", method: "GET", cat: "Mirth", label: "Mirth — Processus",
       desc: "Instantané live du processus Mirth (mcservice.exe) : CPU, mémoire et nombre de sockets.", params: [] },
-    { id: "/api/status", method: "GET", cat: "Service", label: "Statut du service", desc: "État du service et du planificateur.", params: [] },
+    { id: "/api/devices", method: "GET", cat: "Devices", label: "Périphériques — Dernier état",
+      desc: "Dernier état historisé de chaque cible réseau (couple host:port unique visé par les connecteurs Mirth), servi sans appel réseau depuis device_status (alimenté par le collecteur device-ping-collector). Chaque cible porte ses résultats ICMP/port TCP, son état (reachable), la date du dernier changement et la liste des canaux/connecteurs qui la visent. Alimente le tableau récapitulatif de l'onglet « Mirth Dest ».", params: [] },
+    { id: "/api/devices/history", method: "GET", cat: "Devices", label: "Périphériques — Historique",
+      desc: "Série temporelle agrégée par tick (total, online = connexions actives, offline = connexions en erreur) pour le graphe à 2 courbes de l'onglet « Mirth Dest ». Mêmes conventions que /api/history : hours OU intervalle de dates (prioritaire).",
+      params: [
+          { name: "hours", kind: "number", label: "Dernières heures (0=tout)", default: "24" },
+          { name: "date_deb", kind: "text", label: "Début (YYYY-MM-DD[ HH:MM:SS])", placeholder: "(optionnel)" },
+          { name: "date_fin", kind: "text", label: "Fin (YYYY-MM-DD[ HH:MM:SS])", placeholder: "(optionnel)" }
+      ] },
+    { id: "/api/devices/history/at", method: "GET", cat: "Devices", label: "Périphériques — Détail d'un test",
+      desc: "Détail (par cible) d'un point précis de la courbe, identifié par son horodatage exact (tel que renvoyé par /api/devices/history). Renvoie {timestamp, total, online, offline, devices}. Sert au clic sur un point du graphe (détail du test « par datetime »).",
+      params: [ { name: "ts", kind: "text", label: "Horodatage du relevé (YYYY-MM-DD HH:MM:SS)", placeholder: "2026-06-17 10:00:00" } ] },
+    { id: "/api/mirth/endpoints", method: "GET", cat: "Devices", label: "Périphériques — Config (live)",
+      desc: "Liste live des périphériques (endpoints réseau) déduits de la configuration des connecteurs Mirth (GET /channels). Ne sonde rien : sert à (re)scanner la configuration. Chaque endpoint : canal, connecteur, rôle, transport, hôte, port, pingable.",
+      params: [ { name: "timeout", kind: "number", label: "Timeout (s)", default: "8" } ] },
+    { id: "/api/devices/probe", method: "GET", cat: "Devices", label: "Périphériques — Test live (tous)",
+      desc: "Balayage live de connectivité : récupère les endpoints (config Mirth) puis teste chaque cible (ICMP + port TCP), sans rien persister. Renvoie online/offline/untested + le détail par cible. Utilisé par la modale « Connectivité » à la demande.",
+      params: [ { name: "timeout", kind: "number", label: "Timeout (s)", default: "8" } ] },
+    { id: "/api/devices/probe-one", method: "GET", cat: "Devices", label: "Périphériques — Test live (une cible)",
+      desc: "Sonde live d'UN seul équipement (ICMP + port TCP) — test incrémental « à la volée », un spinner par ligne. Ne persiste rien.",
+      params: [
+          { name: "host", kind: "text", label: "Hôte", placeholder: "10.0.0.5" },
+          { name: "port", kind: "number", label: "Port (optionnel)", placeholder: "6661" }
+      ] },
+    { id: "/api/status", method: "GET", cat: "Service", label: "Statut du service", desc: "État du service et du planificateur (dont la tâche device-ping-collector).", params: [] },
     { id: "/api/mail", method: "POST", cat: "Mail", label: "Envoyer un email",
       desc: "Envoie un email via quickmail. Les champs sont transmis dans le corps JSON.",
       params: [

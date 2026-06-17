@@ -318,8 +318,17 @@ def get_vpn_interfaces() -> list:
         })
     return results
 
-def run_ping(ip: str) -> float:
-    return ping(ip, unit='ms')
+def run_ping(ip: str, timeout: float = None) -> float:
+    """Ping ICMP d'un hôte ; latence en ms, None (timeout) ou False (inconnu).
+
+    `timeout` (secondes) borne l'attente de la réponse. Laissé à None, le délai
+    par défaut de ping3 (4 s) s'applique. Pour les sondes de fond, on passe un
+    timeout court (< 1 s) afin de ne pas retarder le planificateur sur un hôte
+    injoignable.
+    """
+    if timeout is None:
+        return ping(ip, unit='ms')
+    return ping(ip, unit='ms', timeout=timeout)
 
 def check_tcp_port(host: str, port: int, timeout: float = 2.0):
     """Teste l'ouverture d'un port TCP : tente une connexion à host:port.

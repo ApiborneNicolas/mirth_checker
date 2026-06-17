@@ -292,6 +292,55 @@ def init_db(db_path=DEFAULT_DB_PATH):
             )
             """
         )
+
+        # ------------------------------------------------------------------
+        # SUPERVISION DES PÉRIPHÉRIQUES (« clients Mirth ») — phase 3.
+        # Un périphérique = une cible réseau UNIQUE (host, port) visée par un ou
+        # plusieurs connecteurs Mirth. On ne teste QUE les couples ip/port et on
+        # ne sonde jamais deux fois la même cible : la dimension est donc le couple
+        # (host, port), pas le connecteur.
+        #   - `device_status` : dernier état par cible (recap + référence d'alarme).
+        #     `connectors` (JSON) liste les canaux/connecteurs qui visent cette cible.
+        #   - `device_history` : agrégat par tick (total / en ligne / en erreur) pour
+        #     le graphe, + `detail` (JSON des résultats par cible à ce tick) afin de
+        #     pouvoir afficher le détail d'un point précis de la courbe (par horodatage).
+        # ------------------------------------------------------------------
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS device_status (
+                id            INTEGER PRIMARY KEY AUTOINCREMENT,
+                host          TEXT    NOT NULL,
+                port          INTEGER,
+                address       TEXT,
+                transport     TEXT,
+                icmp_ok       INTEGER,
+                icmp_ms       REAL,
+                tcp_ok        INTEGER,
+                tcp_ms        REAL,
+                reachable     INTEGER,
+                tested        INTEGER,
+                connectors    TEXT,
+                last_change   TEXT,
+                updated_at    TEXT,
+                UNIQUE(host, port)
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS device_history (
+                id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                timestamp   TEXT    NOT NULL,
+                total       INTEGER,
+                online      INTEGER,
+                offline     INTEGER,
+                detail      TEXT
+            )
+            """
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_device_history_ts ON device_history(timestamp)"
+        )
         conn.commit()
     finally:
         conn.close()
@@ -955,6 +1004,171 @@ def get_events(hours=24, date_deb=None, date_fin=None, category=None, limit=2000
 
 
 # ==========================================================================
+# SUPERVISION DES PÉRIPHÉRIQUES (tables `device_status` / `device_history`)
+# Un périphérique = une cible réseau UNIQUE (host, port). `device_status` garde
+# le dernier état de chaque cible (recap + référence d'alarme) ; `device_history`
+# trace l'agrégat par tick (en ligne / en erreur) + le détail de chaque tick.
+# ==========================================================================
+def _to_bool(v):
+    """Convertit une valeur SQLite (0/1/NULL) en bool, en conservant None."""
+    return None if v is None else bool(v)
+
+
+def upsert_device_status(rows, timestamp=None, db_path=DEFAULT_DB_PATH):
+    """Met à jour l'état courant de chaque cible (host, port), un upsert par cible.
+
+    `rows` est une liste de résultats de sonde — chacun {host, port, address,
+    transport, icmp_ok, icmp_ms, tcp_ok, tcp_ms, reachable, tested, connectors}.
+    `connectors` (liste des canaux/connecteurs visant la cible) est sérialisé en
+    JSON. `last_change` n'est mis à jour que si la joignabilité (`reachable`) a
+    changé depuis le dernier relevé (sinon la valeur précédente est conservée),
+    comme `save_alert_config` : SELECT-puis-INSERT/UPDATE (compat. vieilles SQLite).
+    """
+    now = timestamp or datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    conn = _connect(db_path)
+    try:
+        for r in rows or []:
+            host = r.get("host")
+            if not host:
+                continue
+            port = r.get("port")
+            reachable = None if r.get("reachable") is None else (1 if r.get("reachable") else 0)
+            icmp_ok = None if r.get("icmp_ok") is None else (1 if r.get("icmp_ok") else 0)
+            tcp_ok = None if r.get("tcp_ok") is None else (1 if r.get("tcp_ok") else 0)
+            tested = 1 if r.get("tested") else 0
+            connectors = json.dumps(r.get("connectors") or [])
+            existing = conn.execute(
+                "SELECT id, reachable, last_change FROM device_status "
+                "WHERE host = ? AND port IS ?", (host, port)).fetchone()
+            if existing:
+                # last_change conservé tant que la joignabilité ne change pas.
+                last_change = existing["last_change"]
+                if existing["reachable"] != reachable:
+                    last_change = now
+                conn.execute(
+                    "UPDATE device_status SET address=?, transport=?, icmp_ok=?, "
+                    "icmp_ms=?, tcp_ok=?, tcp_ms=?, reachable=?, tested=?, "
+                    "connectors=?, last_change=?, updated_at=? WHERE id=?",
+                    (r.get("address"), r.get("transport"), icmp_ok, r.get("icmp_ms"),
+                     tcp_ok, r.get("tcp_ms"), reachable, tested, connectors,
+                     last_change, now, existing["id"]))
+            else:
+                conn.execute(
+                    "INSERT INTO device_status (host, port, address, transport, "
+                    "icmp_ok, icmp_ms, tcp_ok, tcp_ms, reachable, tested, connectors, "
+                    "last_change, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    (host, port, r.get("address"), r.get("transport"), icmp_ok,
+                     r.get("icmp_ms"), tcp_ok, r.get("tcp_ms"), reachable, tested,
+                     connectors, now, now))
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def _device_row_to_dict(r):
+    """Normalise une ligne `device_status` en dict JSON (bools + connecteurs)."""
+    d = dict(r)
+    for k in ("reachable", "icmp_ok", "tcp_ok", "tested"):
+        d[k] = _to_bool(d.get(k))
+    try:
+        d["connectors"] = json.loads(d.get("connectors") or "[]")
+    except (ValueError, TypeError):
+        d["connectors"] = []
+    d.pop("id", None)
+    return d
+
+
+def get_device_status(db_path=DEFAULT_DB_PATH):
+    """Dernier état connu de chaque cible (host, port), trié par hôte/port."""
+    conn = _connect(db_path)
+    try:
+        cur = conn.execute(
+            "SELECT * FROM device_status ORDER BY host, port")
+        return [_device_row_to_dict(r) for r in cur.fetchall()]
+    finally:
+        conn.close()
+
+
+def insert_device_history(timestamp=None, total=0, online=0, offline=0,
+                          detail=None, db_path=DEFAULT_DB_PATH):
+    """Enregistre l'agrégat d'un tick de sonde + le détail par cible (JSON).
+
+    `detail` est la liste des résultats par cible (host, port, états...) : elle
+    permet d'afficher le détail d'un point précis de la courbe via son horodatage
+    (cf. get_device_history_at). Une ligne par tick.
+    """
+    ts = timestamp or datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    conn = _connect(db_path)
+    try:
+        conn.execute(
+            "INSERT INTO device_history (timestamp, total, online, offline, detail) "
+            "VALUES (?, ?, ?, ?, ?)",
+            (ts, total, online, offline, json.dumps(detail or [])))
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def get_device_history(hours=24, date_deb=None, date_fin=None, limit=20000,
+                       db_path=DEFAULT_DB_PATH):
+    """Série temporelle agrégée (sans le détail) pour le graphe « clients Mirth ».
+
+    Mêmes modes de sélection que `get_history` (intervalle prioritaire, sinon
+    dernières `hours` heures). Chaque point : {timestamp, total, online, offline}.
+    """
+    deb = _normalize_bound(date_deb, end=False)
+    fin = _normalize_bound(date_fin, end=True)
+    conn = _connect(db_path)
+    try:
+        clauses, params = [], []
+        if deb or fin:
+            if deb:
+                clauses.append("timestamp >= ?")
+                params.append(deb)
+            if fin:
+                clauses.append("timestamp <= ?")
+                params.append(fin)
+        elif hours and hours > 0:
+            since = (datetime.datetime.now()
+                     - datetime.timedelta(hours=hours)).strftime("%Y-%m-%d %H:%M:%S")
+            clauses.append("timestamp >= ?")
+            params.append(since)
+        where = ("WHERE " + " AND ".join(clauses)) if clauses else ""
+        params.append(limit)
+        cur = conn.execute(
+            f"SELECT * FROM (SELECT timestamp, total, online, offline FROM device_history "
+            f"{where} ORDER BY timestamp DESC LIMIT ?) ORDER BY timestamp ASC", params)
+        return [dict(r) for r in cur.fetchall()]
+    finally:
+        conn.close()
+
+
+def get_device_history_at(timestamp, db_path=DEFAULT_DB_PATH):
+    """Détail (par cible) du tick de sonde à l'horodatage donné.
+
+    Sert au clic sur un point de la courbe : renvoie {timestamp, total, online,
+    offline, devices:[...]} pour ce relevé précis (dernier si plusieurs partagent
+    l'horodatage). devices vide si aucun relevé à cet horodatage.
+    """
+    conn = _connect(db_path)
+    try:
+        row = conn.execute(
+            "SELECT * FROM device_history WHERE timestamp = ? ORDER BY id DESC LIMIT 1",
+            (timestamp,)).fetchone()
+    finally:
+        conn.close()
+    if not row:
+        return {"timestamp": timestamp, "total": 0, "online": 0, "offline": 0,
+                "devices": []}
+    try:
+        devices = json.loads(row["detail"] or "[]")
+    except (ValueError, TypeError):
+        devices = []
+    return {"timestamp": row["timestamp"], "total": row["total"],
+            "online": row["online"], "offline": row["offline"], "devices": devices}
+
+
+# ==========================================================================
 # CONFIGURATION DES ALERTES (tables `alert_methods` / `alert_rules`)
 # Réglages persistants de la notification sortante : quelles alarmes notifier,
 # par quelle(s) méthode(s), et vers quel destinataire. Lus par checker_service
@@ -1056,7 +1270,8 @@ def purge_older_than(days=30, db_path=DEFAULT_DB_PATH):
         # (relevés Mirth, débit, évènements/alertes). Tables possiblement absentes
         # sur d'anciennes bases : on ignore l'erreur correspondante. (Le cache des
         # messages en erreur `mirth_messages` est purgé par sa propre colonne plus bas.)
-        for tbl in ("mirth_metrics", "mirth_stats", "mirth_server", "events"):
+        for tbl in ("mirth_metrics", "mirth_stats", "mirth_server", "events",
+                    "device_history"):
             try:
                 conn.execute(f"DELETE FROM {tbl} WHERE timestamp < ?", (cutoff,))
             except sqlite3.Error:
@@ -1265,7 +1480,8 @@ def reset_db(db_path=DEFAULT_DB_PATH):
             # faits (`mirth_stats`) avant la dimension (`mirth_entity`) à cause de
             # la clé étrangère.
             for tbl in ("mirth_metrics", "mirth_messages", "mirth_stats",
-                        "mirth_server", "mirth_entity", "events"):
+                        "mirth_server", "mirth_entity", "events",
+                        "device_status", "device_history"):
                 try:
                     conn.execute(f"DELETE FROM {tbl}")
                 except sqlite3.Error:
@@ -1275,7 +1491,8 @@ def reset_db(db_path=DEFAULT_DB_PATH):
                 conn.execute(
                     "DELETE FROM sqlite_sequence WHERE name IN "
                     "('metrics', 'mirth_metrics', 'mirth_messages', 'mirth_stats', "
-                    "'mirth_server', 'mirth_entity', 'events')"
+                    "'mirth_server', 'mirth_entity', 'events', "
+                    "'device_status', 'device_history')"
                 )
             except sqlite3.Error:
                 pass

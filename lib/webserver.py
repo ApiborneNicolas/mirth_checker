@@ -166,8 +166,14 @@ def _build_handler_class(router):
                 if ctype.startswith("text/") or ctype in ("application/javascript",
                                                            "application/json"):
                     ctype += "; charset=utf-8"
+                # Toujours revalider : les pages/scripts du tableau de bord évoluent
+                # et sont servis depuis le disque. `no-cache` force le navigateur à
+                # revérifier avant de réutiliser sa copie — sans validateur, il
+                # re-télécharge donc la version à jour (pas de page périmée après une
+                # modification). Coût négligeable en réseau local.
                 with open(full, "rb") as f:
-                    self._send(Response(f.read(), content_type=ctype))
+                    self._send(Response(f.read(), content_type=ctype,
+                                        headers={"Cache-Control": "no-cache"}))
                 return True
             return False
 

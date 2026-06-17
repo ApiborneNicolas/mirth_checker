@@ -86,6 +86,18 @@
                      color: var(--muted); margin-left: 7px; border: 1px solid var(--border);
                      border-radius: 5px; padding: 1px 5px; }
 
+        /* --- Onglet « Mirth Logs » : barre d'analyse, pastilles, lignes d'erreur --- */
+        .logs-toolbar { display: flex; gap: 14px; flex-wrap: wrap; align-items: flex-end; }
+        .logs-field { display: flex; flex-direction: column; gap: 4px; }
+        .logs-field .field-label { font-size: 12px; color: var(--muted); }
+        .level-chips { display: flex; gap: 8px; flex-wrap: wrap; }
+        .level-chips .badge { font-size: 12px; }
+        /* Sous-lignes « causes d'erreur » dépliables sous un canal de log */
+        .log-err-row td { background: color-mix(in srgb, var(--panel-2) 55%, transparent);
+                          color: var(--muted); font-size: 12.5px; }
+        .log-err-row .log-err-detail { padding-left: 28px; color: var(--text);
+                                       white-space: normal; word-break: break-word; }
+
         /* Modale « Messages en erreur » : plus large, liste d'items dépliables */
         .modal.wide { width: min(960px, calc(100vw - 32px)); }
         #errors-modal .modal-body { padding: 0; }
@@ -261,6 +273,8 @@
     <!-- ===================== ONGLETS ===================== -->
     <nav class="tabs" id="tabs" role="tablist" aria-label="Sections du tableau de bord">
         <button class="tab active" type="button" role="tab" data-tab="api" aria-selected="true">🩺 Mirth API</button>
+        <button class="tab" type="button" role="tab" data-tab="dest" aria-selected="false">🛰️ Mirth Dest</button>
+        <button class="tab" type="button" role="tab" data-tab="logs" aria-selected="false">📄 Mirth Logs</button>
         <button class="tab" type="button" role="tab" data-tab="process" aria-selected="false">⚙️ Mirth Process</button>
         <button class="tab" type="button" role="tab" data-tab="system" aria-selected="false">🖥 Système</button>
     </nav>
@@ -323,6 +337,140 @@
             </tbody>
         </table>
         <div class="muted-note" id="channels-note"></div>
+    </div>
+    </section>
+
+    <!-- ===== Onglet : Mirth Dest (connectivité des cibles host:port) ===== -->
+    <section class="tab-pane" id="tab-dest" role="tabpanel" aria-label="Mirth Dest">
+    <div class="cards" id="devices-kpis">
+        <div class="card">
+            <div class="label"><span class="dot" style="background:var(--ok)"></span>Connexions actives</div>
+            <div class="value" id="kpi-dev-online">—</div>
+            <div class="sub" id="kpi-dev-online-sub">cibles en ligne</div>
+        </div>
+        <div class="card">
+            <div class="label"><span class="dot" style="background:var(--err)"></span>Connexions en erreur</div>
+            <div class="value" id="kpi-dev-offline">—</div>
+            <div class="sub" id="kpi-dev-offline-sub"></div>
+        </div>
+        <div class="card">
+            <div class="label"><span class="dot" style="background:var(--sock)"></span>Cibles surveillées</div>
+            <div class="value" id="kpi-dev-total">—</div>
+            <div class="sub" id="kpi-dev-total-sub">couples IP : port uniques</div>
+        </div>
+        <div class="card">
+            <div class="label">Dernier test</div>
+            <div class="value" id="kpi-dev-updated">—</div>
+            <div class="sub" id="kpi-dev-updated-sub">en attente…</div>
+        </div>
+    </div>
+
+    <div class="chart-panel">
+        <div class="legend-events" style="display:flex;align-items:center;gap:12px;flex-wrap:wrap;justify-content:space-between">
+            <span>🛰️ Connectivité des cibles Mirth — connexions <b style="color:#22c55e">actives</b> vs <b style="color:#ef4444">en erreur</b> au fil du temps. Cliquez un point pour voir le détail de ce test.</span>
+            <span class="range-summary" id="dev-view-note"></span>
+        </div>
+        <div class="chart-wrap">
+            <canvas id="devicesChart"></canvas>
+        </div>
+    </div>
+
+    <div class="chart-panel" id="devices-recap-panel">
+        <div class="panel-title" style="display:flex;align-items:center;gap:10px">
+            <span id="devices-recap-title">📋 Derniers tests par cible</span>
+            <button id="devices-recap-latest" style="margin-left:auto;display:none"
+                    title="Revenir au dernier test (état courant)">↩ Dernier test</button>
+        </div>
+        <table class="mtable" id="devices-recap-table">
+            <thead>
+                <tr>
+                    <th>Hôte</th><th class="num">Port</th><th>Mode</th>
+                    <th>ICMP</th><th>Port TCP</th><th>État</th>
+                    <th>Canaux / connecteurs</th><th>Depuis</th>
+                </tr>
+            </thead>
+            <tbody id="devices-recap-body">
+                <tr><td colspan="8" class="muted-note">En attente du collecteur de connectivité…</td></tr>
+            </tbody>
+        </table>
+        <div class="muted-note" id="devices-recap-note"></div>
+    </div>
+    </section>
+
+    <!-- ===== Onglet : Mirth Logs (analyse du fichier de log via mirth_logs_parser) ===== -->
+    <section class="tab-pane" id="tab-logs" role="tabpanel" aria-label="Mirth Logs">
+    <div class="chart-panel" id="logs-controls">
+        <div class="panel-title">📄 Analyse du fichier de log Mirth</div>
+        <div class="logs-toolbar">
+            <label class="logs-field" style="flex:1 1 280px">
+                <span class="field-label">Fichier de log (vide = fichier serveur par défaut)</span>
+                <input type="text" id="logs-file"
+                       placeholder="C:\Program Files\Mirth Connect\logs\mirthconnect.log"
+                       title="Chemin du fichier à analyser ; laissez vide pour le fichier par défaut du serveur">
+            </label>
+            <label class="logs-field">
+                <span class="field-label">Période</span>
+                <select id="logs-date" title="Filtre par date des entrées de log">
+                    <option value="1" selected>Tout l'historique</option>
+                    <option value="0">Aujourd'hui</option>
+                    <option value="-1">Hier (J-1)</option>
+                    <option value="-2">Avant-hier (J-2)</option>
+                    <option value="-7">Il y a 7 jours (J-7)</option>
+                </select>
+            </label>
+            <label class="switch-row" style="align-self:flex-end;height:38px"
+                   title="Inclure aussi les fichiers d'archive logrotate (mirthconnect.log.1, .2, …)">
+                <input type="checkbox" id="logs-rotate"> Fichiers archivés
+            </label>
+            <button id="logs-analyze" class="primary" style="align-self:flex-end"
+                    title="Lancer l'analyse du fichier de log à cet instant">⟳ Analyser</button>
+        </div>
+        <div class="muted-note" id="logs-status">Choisissez une période puis cliquez « Analyser » pour lire le fichier de log.</div>
+    </div>
+
+    <div class="cards" id="logs-kpis">
+        <div class="card">
+            <div class="label"><span class="dot" style="background:var(--cpu)"></span>Entrées analysées</div>
+            <div class="value" id="lk-total">—</div>
+            <div class="sub" id="lk-total-sub">en attente…</div>
+        </div>
+        <div class="card">
+            <div class="label"><span class="dot" style="background:var(--err)"></span>Erreurs</div>
+            <div class="value" id="lk-errors">—</div>
+            <div class="sub" id="lk-errors-sub"></div>
+        </div>
+        <div class="card">
+            <div class="label"><span class="dot" style="background:var(--warn)"></span>Avertissements</div>
+            <div class="value" id="lk-warn">—</div>
+            <div class="sub" id="lk-warn-sub"></div>
+        </div>
+        <div class="card">
+            <div class="label"><span class="dot" style="background:var(--sock)"></span>Canaux détectés</div>
+            <div class="value" id="lk-channels">—</div>
+            <div class="sub" id="lk-channels-sub"></div>
+        </div>
+    </div>
+
+    <div class="chart-panel" id="logs-levels-panel" style="display:none">
+        <div class="panel-title">Répartition par niveau</div>
+        <div class="level-chips" id="logs-levels"></div>
+    </div>
+
+    <div class="chart-panel" id="logs-channels-panel">
+        <div class="panel-title">📑 Détail par canal — cliquez un canal en erreur pour déplier ses causes</div>
+        <table class="mtable" id="logs-channels-table">
+            <thead>
+                <tr>
+                    <th>Canal</th><th>ID canal</th>
+                    <th class="num">Total</th><th class="num">INFO</th>
+                    <th class="num">ERROR</th><th class="num">Autre</th><th>Dernier échange</th>
+                </tr>
+            </thead>
+            <tbody id="logs-channels-body">
+                <tr><td colspan="7" class="muted-note">Aucune analyse pour le moment.</td></tr>
+            </tbody>
+        </table>
+        <div class="muted-note" id="logs-channels-note"></div>
     </div>
     </section>
 
@@ -422,6 +570,12 @@ let mirthChart = null;
 let throughputChart = null;
 let throughputSamples = [];   // cache de la série d'activité (re-rendu sans refetch)
 let mirthOverviewTimer = null;
+
+// Onglet « Mirth Dest » : graphe de connectivité (actives vs en erreur) + tableau.
+let devicesChart = null;
+let deviceHistorySamples = [];      // cache de la série (re-rendu sans refetch)
+let deviceChartTimestamps = [];     // horodatages alignés sur les points du graphe
+let deviceViewTs = null;            // null = dernier test ; sinon point figé cliqué
 
 // Second jeu de données temporel : les ÉVÈNEMENTS/ALERTES (table `events`).
 // Partagé par TOUS les graphiques : chaque évènement devient une barre verticale
@@ -546,6 +700,7 @@ async function loadEventsFull() {
         render();
         renderMirth();
         renderThroughput();
+        renderDevices();
     } catch (e) { /* la section système gère déjà le bandeau hors-ligne */ }
 }
 
@@ -578,7 +733,7 @@ async function loadEventsIncremental() {
                 }
             }
         }
-        if (added) { render(); renderMirth(); renderThroughput(); }
+        if (added) { render(); renderMirth(); renderThroughput(); renderDevices(); }
     } catch (e) { /* ignore */ }
 }
 
@@ -761,6 +916,11 @@ async function loadFull() {
     loadThroughput();
     fetchMirthProcess();
     fetchMirthOverview();
+    // Onglet « Mirth Dest » : on repart sur le dernier test (vue courante) puis
+    // on recharge la série de connectivité et le tableau récapitulatif.
+    deviceViewTs = null;
+    loadDeviceHistory();
+    fetchDevicesLatest();
     // Évènements/alertes : second jeu de données superposé aux deux graphes.
     loadEventsFull();
 }
@@ -790,6 +950,10 @@ async function loadIncremental() {
     loadMirthIncremental();
     loadThroughput();
     fetchMirthProcess();
+    // Onglet « Mirth Dest » : série rechargée à chaque tick. Le tableau n'est
+    // rafraîchi que si l'on regarde le dernier test (pas un point passé figé).
+    loadDeviceHistory();
+    if (!deviceViewTs) fetchDevicesLatest();
     // Évènements/alertes incrémentaux (barres superposées aux deux graphes).
     loadEventsIncremental();
 }
@@ -1714,13 +1878,379 @@ document.getElementById("applyInterval").addEventListener("click", enterInterval
 document.getElementById("clearInterval").addEventListener("click", exitIntervalMode);
 
 // Re-rendu des graphiques quand le thème bascule (couleurs d'axes / légende).
-document.addEventListener("mc-theme-change", () => { if (chart) render(); if (mirthChart) renderMirth(); if (throughputChart) renderThroughput(); });
+document.addEventListener("mc-theme-change", () => { if (chart) render(); if (mirthChart) renderMirth(); if (throughputChart) renderThroughput(); if (devicesChart) renderDevices(); });
 
-// ---------- Onglets (Mirth API / Mirth Process / Système) ----------
-const TAB_NAMES = ["api", "process", "system"];
+// =====================================================================
+// ONGLET « MIRTH DEST » : connectivité des cibles (host:port) au fil du temps
+// Graphe à 2 courbes (connexions actives / en erreur) alimenté par
+// /api/devices/history ; tableau récapitulatif via /api/devices ; un clic sur un
+// point du graphe affiche le détail de CE test (par horodatage) via
+// /api/devices/history/at.
+// =====================================================================
+async function fetchDeviceHistory(params) {
+    const qs = new URLSearchParams(params).toString();
+    const r = await fetch(`${API}/api/devices/history?${qs}`);
+    if (!r.ok) throw new Error("HTTP " + r.status);
+    return r.json();
+}
+
+// Charge la série de connectivité (selon la période courante) et (re)dessine.
+async function loadDeviceHistory() {
+    try {
+        const data = await fetchDeviceHistory(currentParams());
+        deviceHistorySamples = data.samples || [];
+        buildDevicesChart(deviceHistorySamples);
+    } catch (e) { /* la section système gère déjà le bandeau hors-ligne */ }
+}
+
+// Redessine le graphe depuis le cache (overlay d'évènements / bascule de thème).
+function renderDevices() { buildDevicesChart(deviceHistorySamples); }
+
+// Graphe « clients Mirth » : connexions actives (vert) vs en erreur (rouge).
+function buildDevicesChart(samples) {
+    const labels = samples.map(s => luxon.DateTime.fromFormat(s.timestamp, "yyyy-MM-dd HH:mm:ss").toJSDate());
+    deviceChartTimestamps = samples.map(s => s.timestamp);
+    const online = samples.map(s => s.online);
+    const offline = samples.map(s => s.offline);
+
+    const datasets = [
+        { label: "Connexions actives",  data: online,  borderColor: "#22c55e", backgroundColor: "rgba(34,197,94,.12)", tension: .25, fill: true, pointRadius: 2, pointHoverRadius: 5, borderWidth: 2, spanGaps: true },
+        { label: "Connexions en erreur", data: offline, borderColor: "#ef4444", backgroundColor: "rgba(239,68,68,.12)", tension: .25, fill: true, pointRadius: 2, pointHoverRadius: 5, borderWidth: 2, spanGaps: true },
+    ];
+
+    const tc = window.MCTheme ? MCTheme.chartColors() : { tick: "#94a3b8", grid: "rgba(148,163,184,.08)", text: "#e2e8f0" };
+    const markers = eventMarkers();
+    // Clic sur un point => détail du test à cet horodatage (par datetime).
+    const onClick = (evt) => {
+        if (!devicesChart) return;
+        const pts = devicesChart.getElementsAtEventForMode(evt, "index", { intersect: false }, true);
+        if (!pts.length) return;
+        const ts = deviceChartTimestamps[pts[0].index];
+        if (ts) loadDeviceDetailAt(ts);
+    };
+    const cfg = {
+        type: "line",
+        data: { labels, datasets },
+        plugins: [eventLinesPlugin],
+        options: {
+            responsive: true,
+            maintainAspectRatio: false,
+            onClick,
+            interaction: { mode: "index", intersect: false },
+            scales: {
+                x: xTimeScale(tc),
+                y: {
+                    min: 0, position: "left",
+                    title: { display: true, text: "cibles", color: tc.tick },
+                    ticks: { color: tc.tick, precision: 0 },
+                    grid: { color: tc.grid }
+                }
+            },
+            plugins: {
+                legend: { labels: { color: tc.text, usePointStyle: true, boxWidth: 8 } },
+                tooltip: { callbacks: {
+                    title: items => {
+                        const ts = items.length ? deviceChartTimestamps[items[0].dataIndex] : null;
+                        return ts ? "Test du " + luxon.DateTime.fromFormat(ts, "yyyy-MM-dd HH:mm:ss").toFormat("dd/MM HH:mm:ss") : "";
+                    },
+                    label: c => `${c.dataset.label}: ${c.parsed.y == null ? "—" : c.parsed.y}`,
+                    footer: () => "Cliquez pour le détail de ce test"
+                } }
+            }
+        }
+    };
+
+    if (devicesChart) {
+        devicesChart.data.labels = labels;
+        datasets.forEach((ds, i) => {
+            if (devicesChart.data.datasets[i]) devicesChart.data.datasets[i].data = ds.data;
+            else devicesChart.data.datasets[i] = ds;
+        });
+        devicesChart.options.scales.x.ticks.color = tc.tick;
+        devicesChart.options.scales.x.grid.color = tc.grid;
+        devicesChart.options.scales.y.ticks.color = tc.tick;
+        devicesChart.options.scales.y.grid.color = tc.grid;
+        devicesChart.options.plugins.legend.labels.color = tc.text;
+        applyTimeBounds(devicesChart);
+        devicesChart.$eventMarkers = markers;
+        devicesChart.update("none");
+    } else {
+        devicesChart = new Chart(document.getElementById("devicesChart"), cfg);
+        devicesChart.$eventMarkers = markers;
+        devicesChart.update();
+    }
+}
+
+// KPI de l'onglet (depuis /api/devices : dernier état de chaque cible).
+function setDeviceKpis(d) {
+    const num = v => (v == null ? "—" : v);
+    document.getElementById("kpi-dev-online").textContent = num(d.online);
+    const offEl = document.getElementById("kpi-dev-offline");
+    offEl.textContent = num(d.offline);
+    offEl.style.color = (typeof d.offline === "number" && d.offline > 0) ? "var(--err)" : "";
+    document.getElementById("kpi-dev-offline-sub").textContent =
+        (typeof d.offline === "number" && d.offline > 0) ? "à surveiller" : "aucune erreur";
+    document.getElementById("kpi-dev-total").textContent = num(d.count);
+    const upd = d.updated_at;
+    document.getElementById("kpi-dev-updated").textContent = upd
+        ? luxon.DateTime.fromFormat(upd, "yyyy-MM-dd HH:mm:ss").toFormat("HH:mm:ss") : "—";
+    document.getElementById("kpi-dev-updated-sub").textContent = upd
+        ? "dernier balayage" : "collecteur en attente";
+}
+
+// Tableau récapitulatif (dernier état courant). N'écrase pas une vue figée.
+async function fetchDevicesLatest() {
+    try {
+        const r = await fetch(`${API}/api/devices`);
+        if (!r.ok) return;
+        const d = await r.json();
+        setDeviceKpis(d);
+        if (!deviceViewTs)
+            renderDeviceRecap(d.devices || [], { online: d.online, offline: d.offline });
+    } catch (e) { /* ignore */ }
+}
+
+// Détail d'un test passé (clic sur un point du graphe) : fige la vue sur l'instant.
+async function loadDeviceDetailAt(ts) {
+    try {
+        const r = await fetch(`${API}/api/devices/history/at?ts=${encodeURIComponent(ts)}`);
+        const d = await r.json();
+        deviceViewTs = ts;
+        renderDeviceRecap(d.devices || [],
+            { ts: d.timestamp || ts, online: d.online, offline: d.offline });
+        document.getElementById("dev-view-note").innerHTML =
+            "⏸ Détail figé : <b>" + escapeHtml(ts) + "</b>";
+        document.getElementById("devices-recap-panel")
+            .scrollIntoView({ behavior: "smooth", block: "nearest" });
+    } catch (e) { /* ignore */ }
+}
+
+// Revient à l'affichage du dernier test (état courant).
+function deviceViewLatest() {
+    deviceViewTs = null;
+    document.getElementById("dev-view-note").textContent = "";
+    fetchDevicesLatest();
+}
+
+// Cellules du tableau (badges réutilisant le style des autres tableaux).
+function recapIcmpCell(d) {
+    if (d.icmp_ok === true) return `<span class="badge on">${escapeHtml(d.icmp_ms)} ms</span>`;
+    if (d.icmp_ok === false) return '<span class="badge off">✗</span>';
+    return '<span class="muted">—</span>';
+}
+function recapTcpCell(d) {
+    if (d.tcp_ok === true)
+        return `<span class="badge on">ouvert${d.tcp_ms != null ? " " + escapeHtml(d.tcp_ms) + " ms" : ""}</span>`;
+    if (d.tcp_ok === false) return '<span class="badge off">fermé</span>';
+    return '<span class="muted">—</span>';
+}
+function recapStateCell(d) {
+    if (d.reachable === true)  return '<span class="badge on">● en ligne</span>';
+    if (d.reachable === false) return '<span class="badge off">● hors ligne</span>';
+    return '<span class="badge idle">non testé</span>';
+}
+function recapConnCell(d) {
+    const conns = d.connectors || [];
+    if (!conns.length) return '<span class="muted">—</span>';
+    return conns.map(c =>
+        `<div style="font-size:12px">${escapeHtml(c.channel_name || c.channel_id || "—")} ` +
+        `<span class="conn-role">${escapeHtml(c.name || "—")}</span></div>`).join("");
+}
+
+// Rendu du tableau récapitulatif (dernier état OU détail d'un test figé).
+function renderDeviceRecap(devices, info) {
+    info = info || {};
+    const body = document.getElementById("devices-recap-body");
+    const note = document.getElementById("devices-recap-note");
+    const title = document.getElementById("devices-recap-title");
+    const latestBtn = document.getElementById("devices-recap-latest");
+    if (info.ts) {
+        title.textContent = "📋 Détail du test — " +
+            luxon.DateTime.fromFormat(info.ts, "yyyy-MM-dd HH:mm:ss").toFormat("dd/MM/yyyy HH:mm:ss");
+        latestBtn.style.display = "";
+    } else {
+        title.textContent = "📋 Derniers tests par cible";
+        latestBtn.style.display = "none";
+    }
+    if (!devices.length) {
+        body.innerHTML = '<tr><td colspan="8" class="muted-note">' +
+            (info.ts ? "Aucun détail pour ce test."
+                     : "Aucune cible réseau (host:port) détectée — le collecteur n'a pas encore relevé de connecteur testable.") +
+            '</td></tr>';
+        note.textContent = "";
+        return;
+    }
+    body.innerHTML = devices.map(d => {
+        const since = d.last_change || (info.ts || "—");
+        return `<tr>
+            <td>${escapeHtml(d.host || "—")}</td>
+            <td class="num">${d.port != null ? escapeHtml(d.port) : "—"}</td>
+            <td>${escapeHtml(d.transport || "—")}</td>
+            <td>${recapIcmpCell(d)}</td>
+            <td>${recapTcpCell(d)}</td>
+            <td>${recapStateCell(d)}</td>
+            <td>${recapConnCell(d)}</td>
+            <td style="font-size:12px;color:var(--muted)">${escapeHtml(since)}</td>
+        </tr>`;
+    }).join("");
+    const online = info.online != null ? info.online : devices.filter(d => d.reachable === true).length;
+    const offline = info.offline != null ? info.offline : devices.filter(d => d.reachable === false).length;
+    note.textContent = `${devices.length} cible(s) — ${online} en ligne · ${offline} en erreur` +
+        (info.ts ? ` — test du ${info.ts}` : " — état courant ; cliquez un point du graphe pour un test passé.");
+}
+
+document.getElementById("devices-recap-latest").addEventListener("click", deviceViewLatest);
+
+// =====================================================================
+// ONGLET « MIRTH LOGS » : analyse du fichier de log (mirth_logs_parser) via
+// /api/mirth. Analyse à la demande (bouton « Analyser ») d'un instant T ;
+// chargée paresseusement à la première ouverture de l'onglet.
+// =====================================================================
+let logsLoaded = false;   // analyse déjà lancée au moins une fois ?
+let logsBusy = false;     // analyse en cours (évite les doubles clics)
+
+// Convertit "yyyy-MM-dd HH:mm:ss(.SSS)" en date FR lisible (ou "—").
+function frDate(s) {
+    if (!s) return "—";
+    const dt = luxon.DateTime.fromFormat(String(s).split(".")[0], "yyyy-MM-dd HH:mm:ss");
+    return dt.isValid ? dt.toFormat("dd/MM/yyyy HH:mm:ss") : s;
+}
+
+async function analyzeLogs() {
+    if (logsBusy) return;
+    logsBusy = true;
+    logsLoaded = true;
+    const btn = document.getElementById("logs-analyze");
+    const status = document.getElementById("logs-status");
+    btn.disabled = true;
+    status.innerHTML = '<span class="mini-spinner"></span> Analyse en cours…';
+
+    const params = {};
+    const file = document.getElementById("logs-file").value.trim();
+    if (file) params.logfile = file;
+    params.date = document.getElementById("logs-date").value;
+    if (document.getElementById("logs-rotate").checked) params.rotate = "1";
+
+    try {
+        const qs = new URLSearchParams(params).toString();
+        const r = await fetch(`${API}/api/mirth?${qs}`);
+        const data = await r.json();
+        if (!r.ok || data.exists === false) throw new Error(data.error || ("HTTP " + r.status));
+        renderLogsSummary(data);
+        const now = luxon.DateTime.fromMillis(serverNowMs()).toFormat("dd/MM/yyyy HH:mm:ss");
+        status.innerHTML = `Analysé le <b>${escapeHtml(now)}</b> — fichier <code>${escapeHtml(data.logfile || "—")}</code>` +
+            (data.files && data.files.length ? ` · ${data.files.length} fichier(s)` : "");
+    } catch (e) {
+        status.innerHTML = '<span style="color:var(--err)">Échec de l\'analyse : ' + escapeHtml(e.message) + '</span>';
+    } finally {
+        btn.disabled = false;
+        logsBusy = false;
+    }
+}
+
+function renderLogsSummary(d) {
+    const total = d.total_entries || 0;
+    const levelMap = {};
+    (d.levels || []).forEach(l => { levelMap[(l.level || "").toUpperCase()] = l; });
+    const errCount = (levelMap.ERROR && levelMap.ERROR.count) || 0;
+    const warnCount = ((levelMap.WARN && levelMap.WARN.count) || 0) +
+                      ((levelMap.WARNING && levelMap.WARNING.count) || 0);
+    const pctOf = c => total ? (c / total * 100).toFixed(1) + " % des entrées" : "—";
+
+    document.getElementById("lk-total").textContent = total.toLocaleString("fr-FR");
+    document.getElementById("lk-total-sub").textContent = (d.files ? d.files.length : 0) + " fichier(s) analysé(s)";
+    document.getElementById("lk-errors").textContent = errCount.toLocaleString("fr-FR");
+    document.getElementById("lk-errors-sub").textContent = pctOf(errCount);
+    document.getElementById("lk-warn").textContent = warnCount.toLocaleString("fr-FR");
+    document.getElementById("lk-warn-sub").textContent = pctOf(warnCount);
+    document.getElementById("lk-channels").textContent = (d.channels || []).length;
+    document.getElementById("lk-channels-sub").textContent =
+        d.oldest && d.newest ? frDate(d.oldest) + " → " + frDate(d.newest) : "période inconnue";
+
+    renderLogLevels(d.levels || []);
+    renderLogChannels(d.channels || [], d.errors || []);
+}
+
+// Pastilles colorées de la répartition par niveau de log.
+function renderLogLevels(levels) {
+    const panel = document.getElementById("logs-levels-panel");
+    const box = document.getElementById("logs-levels");
+    if (!levels.length) { panel.style.display = "none"; box.innerHTML = ""; return; }
+    const cls = lvl => {
+        const s = (lvl || "").toUpperCase();
+        if (s === "ERROR") return "badge off";
+        if (s === "WARN" || s === "WARNING") return "badge warn";
+        if (s === "INFO") return "badge on";
+        return "badge idle";
+    };
+    box.innerHTML = levels.map(l =>
+        `<span class="${cls(l.level)}">${escapeHtml(l.level || "—")} · ${l.count}` +
+        (l.percent != null ? ` (${l.percent}%)` : "") + `</span>`).join("");
+    panel.style.display = "";
+}
+
+// Table des canaux du log, dépliable pour révéler les causes d'erreur du canal.
+function renderLogChannels(channels, errors) {
+    const body = document.getElementById("logs-channels-body");
+    const note = document.getElementById("logs-channels-note");
+    const num = v => (v === null || v === undefined) ? "—" : v;
+
+    if (!channels.length) {
+        body.innerHTML = '<tr><td colspan="7" class="muted-note">Aucune entrée de log pour cette période.</td></tr>';
+        note.textContent = "";
+        return;
+    }
+
+    // Le résumé fournit error.channel = nom du canal : on regroupe par ce nom.
+    const errByChannel = {};
+    for (const e of errors) (errByChannel[e.channel] = errByChannel[e.channel] || []).push(e);
+
+    let rows = "";
+    channels.forEach((c, i) => {
+        const chErrors = errByChannel[c.channel] || [];
+        const expandable = chErrors.length > 0;
+        const caret = expandable ? '<span class="chan-caret">▶</span> ' : '';
+        const errCell = c.error
+            ? '<b style="color:var(--err)">' + c.error + '</b>' : num(c.error);
+        rows += `<tr class="chan-row${expandable ? " expandable" : ""}" data-li="${i}">
+            <td class="chan-name">${caret}${escapeHtml(c.channel || "—")}</td>
+            <td>${escapeHtml(c.channel_id || "—")}</td>
+            <td class="num">${num(c.total)}</td>
+            <td class="num">${num(c.info)}</td>
+            <td class="num">${errCell}</td>
+            <td class="num">${num(c.other)}</td>
+            <td>${frDate(c.last)}</td>
+        </tr>`;
+        for (const e of chErrors) {
+            rows += `<tr class="log-err-row" data-parent="${i}" hidden>
+                <td class="log-err-detail" colspan="4">⚠ ${escapeHtml(e.detail || "(sans détail)")}</td>
+                <td class="num"><b>${e.count}</b></td>
+                <td></td>
+                <td>${frDate(e.last)}</td>
+            </tr>`;
+        }
+    });
+    body.innerHTML = rows;
+    note.textContent = channels.length +
+        " canal(aux) — les canaux en erreur sont dépliables pour en voir les causes regroupées.";
+
+    body.querySelectorAll(".chan-row.expandable").forEach(row => {
+        const li = row.dataset.li;
+        row.querySelector(".chan-name").addEventListener("click", () => {
+            const open = row.classList.toggle("open");
+            body.querySelectorAll('.log-err-row[data-parent="' + li + '"]')
+                .forEach(r => { r.hidden = !open; });
+        });
+    });
+}
+
+document.getElementById("logs-analyze").addEventListener("click", analyzeLogs);
+
+// ---------- Onglets (Mirth API / Mirth Dest / Mirth Logs / Mirth Process / Système) ----------
+const TAB_NAMES = ["api", "dest", "logs", "process", "system"];
 // Graphe principal de chaque onglet : redimensionné une fois l'onglet visible
 // (un canvas Chart.js créé dans un onglet masqué a une taille nulle).
-const TAB_CHART = { api: () => throughputChart, process: () => mirthChart, system: () => chart };
+const TAB_CHART = { api: () => throughputChart, dest: () => devicesChart, process: () => mirthChart, system: () => chart };
 
 function activateTab(name) {
     if (!TAB_NAMES.includes(name)) name = "api";
@@ -1733,6 +2263,8 @@ function activateTab(name) {
         p.classList.toggle("active", p.id === "tab-" + name);
     });
     try { localStorage.setItem("mc-stats-tab", name); } catch (e) { /* ignore */ }
+    // Onglet « Mirth Logs » : première ouverture => analyse paresseuse (instant T).
+    if (name === "logs" && !logsLoaded) analyzeLogs();
     // Le canvas devient mesurable une fois l'onglet affiché : on le redimensionne.
     requestAnimationFrame(() => { const c = TAB_CHART[name] && TAB_CHART[name](); if (c) c.resize(); });
 }
@@ -1743,8 +2275,14 @@ document.querySelectorAll(".tabs .tab").forEach(b => {
 
 setInterval(tickClock, 1000);   // horloge système qui défile entre deux refresh
 updateRangeSummary();
-// Onglet actif initial : dernier consulté (défaut « Mirth API »).
-(function () { let t = "api"; try { t = localStorage.getItem("mc-stats-tab") || "api"; } catch (e) {} activateTab(t); })();
+// Onglet actif initial : ?tab= (lien profond) sinon dernier consulté (défaut « Mirth API »).
+(function () {
+    let t = "api";
+    const q = new URLSearchParams(location.search).get("tab");
+    if (q && TAB_NAMES.includes(q)) { t = q; }
+    else { try { t = localStorage.getItem("mc-stats-tab") || "api"; } catch (e) {} }
+    activateTab(t);
+})();
 // Affichage en haut de page (sans animation, malgré scroll-behavior: smooth).
 window.scrollTo({ top: 0, left: 0, behavior: "instant" });
 fetchHostInfo();

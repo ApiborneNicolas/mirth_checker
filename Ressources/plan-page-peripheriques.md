@@ -1,12 +1,24 @@
 # Plan — Supervision des « périphériques » Mirth (config des connecteurs + ping/port)
 
-> **État d'avancement — ✅ Phases 1 & 2 OPÉRATIONNELLES, ⏳ seule la phase 3 reste à faire.**
+> **État d'avancement — ✅ Phases 1, 2 & 3 OPÉRATIONNELLES.**
 > - **Phase 1** (lecture/parsing de la config des connecteurs) : **livrée et vérifiée**
 >   (`mirth_api.get_connector_endpoints`, rapport + CLI `-s endpoints`, simulateur servant `GET /channels`).
 > - **Phase 2** (vérif. temps réel à la demande) : **livrée et vérifiée** (`system_state.check_tcp_port`,
 >   `checker_service.probe_endpoints`, routes `/api/mirth/endpoints` + `/api/devices/probe`,
 >   bouton **🛰️ Connectivité** + modale dans `statistiques.html`).
-> - **Phase 3** (historisation + onglet « Clients Mirth » + alarmes paramétrables) : **à implémenter**.
+> - **Phase 3** (historisation + onglet + alarmes paramétrables) : **livrée et vérifiée**, avec
+>   deux écarts validés par rapport au plan initial ci-dessous :
+>   1. L'UI n'est **pas** une page séparée `clients.html` mais un **nouvel onglet « 🛰️ Mirth Dest »**
+>      (2ᵉ position) dans `statistiques.html` : KPI + graphe 2 courbes (connexions **actives** vs
+>      **en erreur**) + barres d'évènements + tableau récapitulatif des derniers tests ; un clic sur
+>      un point du graphe affiche le détail de CE test (par horodatage).
+>   2. L'entité supervisée est la **cible réseau unique `(host, port)`** (et non le connecteur) :
+>      on **ne teste que les couples ip/port** et **jamais deux fois la même IP** (ICMP dédupliqué par
+>      hôte, port TCP par couple). Tables `device_status` (clé `(host, port)`) + `device_history`
+>      (agrégat + `detail` JSON par tick). Ping de fond à **timeout < 1 s** (`run_ping(timeout=…)`).
+>      Collecteur `device-ping-collector` (4ᵉ tâche de `start_staggered`), ligne d'état console enrichie,
+>      alarmes `device_unreachable`/`device_up` (catégorie `network`), routes `/api/devices`,
+>      `/api/devices/history`, `/api/devices/history/at` (toutes documentées dans `api.html`).
 
 ## Contexte
 

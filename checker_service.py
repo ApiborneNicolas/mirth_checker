@@ -31,6 +31,7 @@ import argparse
 import datetime
 import threading
 import urllib.parse
+import concurrent.futures
 
 from tabulate import tabulate
 
@@ -162,6 +163,12 @@ ALARM_CATALOG = [
     {"code": "mirth_message_error", "title": "Message en erreur",
      "event_label": "Message en erreur",     "category": "mirth",
      "severity": "warning",  "default_email": True,  "default_mqtt": True},
+    {"code": "device_unreachable", "title": "Périphérique injoignable",
+     "event_label": "Périphérique injoignable", "category": "network",
+     "severity": "critical", "default_email": True,  "default_mqtt": True},
+    {"code": "device_up",    "title": "Périphérique de retour en ligne",
+     "event_label": "Périphérique en ligne", "category": "network",
+     "severity": "info",     "default_email": False, "default_mqtt": False},
 ]
 ALARM_BY_CODE = {a["code"]: a for a in ALARM_CATALOG}
 
@@ -233,6 +240,11 @@ def _build_alarm_context(code, timestamp):
     # dispatch_alerts) ; pour un test depuis la page, il fournit un échantillon.
     if code == "mirth_message_error":
         ctx["error_messages"] = database.get_recent_error_messages(limit=20)
+    # Alarmes périphériques : joint l'état courant des cibles (lecture locale).
+    # Pour une alarme réelle, ce champ est remplacé par la liste exacte des cibles
+    # concernées via le `context` transmis à emit_alarm/dispatch_alerts.
+    if code in ("device_unreachable", "device_up"):
+        ctx["devices"] = database.get_device_status()
     return ctx
 
 
@@ -349,6 +361,28 @@ def build_alert_email(ctx):
                 urls.append(url)
         if len(msgs) > 20:
             lines.append(f"  ... et {len(msgs) - 20} autre(s).")
+    # Détail des périphériques (alarmes `device_unreachable`/`device_up`) : liste
+    # les cibles (host:port) avec leur état et les canaux/connecteurs qui les visent.
+    devs = ctx.get("devices") or []
+    if devs:
+        lines += ["", f"— Périphériques ({len(devs)}) ——————————————————————"]
+        for d in devs[:30]:
+            addr = d.get("address") or (f"{d.get('host')}:{d.get('port')}"
+                                        if d.get("host") else "?")
+            state = ("HORS LIGNE" if d.get("reachable") is False
+                     else "en ligne" if d.get("reachable") is True else "non testé")
+            probe = []
+            if d.get("tcp_ok") is not None:
+                probe.append("port " + ("ouvert" if d.get("tcp_ok") else "fermé"))
+            if d.get("icmp_ok") is not None:
+                probe.append("ICMP " + (f"{d.get('icmp_ms')} ms" if d.get("icmp_ok") else "✗"))
+            lines.append(f"  - [{state}] {addr}"
+                         + (f"  ({', '.join(probe)})" if probe else ""))
+            for c in (d.get("connectors") or [])[:6]:
+                who = c.get("channel_name") or c.get("channel_id") or "?"
+                lines.append(f"      ↳ {who} / {c.get('name') or '-'}")
+        if len(devs) > 30:
+            lines.append(f"  ... et {len(devs) - 30} autre(s).")
     lines += ["", "—",
               "Message automatique du service de supervision Mirth Checker."]
     message = "\n".join(lines)
@@ -717,6 +751,225 @@ def _handle_new_error_messages(new_msgs, timeout=8):
                context={"error_messages": enriched})
 
 
+# ==========================================================================
+# SUPERVISION DES PÉRIPHÉRIQUES (« clients Mirth ») — collecteur de fond
+# Teste périodiquement la connectivité des cibles réseau (host, port) visées par
+# les connecteurs Mirth. On ne teste QUE les couples ip/port, et JAMAIS deux fois
+# la même IP (ICMP dédupliqué par hôte ; port TCP par couple host/port). Historise
+# l'agrégat (en ligne / en erreur) pour le graphe et émet une alarme paramétrable
+# quand une cible devient injoignable / revient en ligne.
+# ==========================================================================
+# Nom de la tâche du planificateur (partagé entre main() et la ligne d'état).
+DEVICE_TASK_NAME = "device-ping-collector"
+
+# Timeouts COURTS dédiés au collecteur de fond : ping < 1 s + test de port bref,
+# pour ne pas retarder la grille du planificateur sur une cible injoignable. Avec
+# les sondes lancées EN PARALLÈLE (cf. _probe_targets), la durée totale d'un tick
+# reste bornée par la cible la plus lente (~1 s) et non par leur somme.
+_DEVICE_PING_TIMEOUT = 0.8
+_DEVICE_TCP_TIMEOUT = 0.8
+
+# Pool de sondes concurrentes (borne le nombre de threads créés par tick).
+_DEVICE_PROBE_WORKERS = 16
+
+# Config des connecteurs mise en cache (GET /channels est plus lourd et la config
+# change peu) : rafraîchie tous les _DEVICE_ENDPOINTS_REFRESH_EVERY ticks, ou tant
+# qu'aucune lecture n'a encore abouti.
+_DEVICE_ENDPOINTS_REFRESH_EVERY = 10
+_device_endpoints_cache = None
+_device_endpoints_tick = 0
+
+# Jeu des cibles (host, port) injoignables au tick précédent. None = inconnu :
+# 1er tick / post-redémarrage => baseline silencieuse (pas d'alarme rétroactive),
+# comme `_mirth_error_keys_prev`.
+_device_down_prev = None
+
+# Dernier résumé de connectivité, affiché dans la ligne d'état console.
+_device_last_summary = ""
+
+
+def _device_targets(endpoints):
+    """Cibles réseau UNIQUES (host, port) à tester, agrégeant leurs connecteurs.
+
+    Ne retient que les connecteurs réseau ayant À LA FOIS un hôte et un port (« on
+    ne teste que les ip/port »). Les cibles sont dédupliquées sur (host, port) : un
+    même équipement visé par plusieurs connecteurs n'apparaît qu'une fois, avec la
+    liste des connecteurs qui le visent.
+    """
+    targets = {}
+    for ep in endpoints or []:
+        host = ep.get("host")
+        port = ep.get("port")
+        if not host or port is None or not ep.get("pingable"):
+            continue
+        key = (host, port)
+        t = targets.get(key)
+        if t is None:
+            t = {"host": host, "port": port,
+                 "address": ep.get("address") or f"{host}:{port}",
+                 "transport": ep.get("transport"), "connectors": []}
+            targets[key] = t
+        t["connectors"].append({
+            "channel_id": ep.get("channel_id"),
+            "channel_name": ep.get("channel_name"),
+            "meta_data_id": ep.get("meta_data_id"),
+            "name": ep.get("name"),
+            "role": ep.get("role"),
+        })
+    return list(targets.values())
+
+
+def _probe_targets(targets, ping_timeout=_DEVICE_PING_TIMEOUT,
+                   tcp_timeout=_DEVICE_TCP_TIMEOUT):
+    """Sonde des cibles (host, port) UNIQUES : ICMP + port TCP, EN PARALLÈLE.
+
+    Les sondes s'exécutent dans un petit pool de threads, si bien que la durée
+    totale d'un relevé reste bornée par la cible la PLUS LENTE (~1 s) et non par
+    leur somme — le tick tient ainsi largement dans l'intervalle du planificateur,
+    même avec de nombreuses cibles. L'ICMP est dédupliqué PAR HÔTE (jamais deux
+    pings sur la même IP) et le port TCP par couple (host, port). Le port TCP
+    (signal applicatif fiable) pilote `reachable`. Fonction PURE ; ne lève jamais.
+    """
+    if not targets:
+        return []
+    hosts = list({t.get("host") for t in targets if t.get("host")})
+    couples = list({(t.get("host"), t.get("port")) for t in targets})
+
+    def _do_ping(host):
+        try:
+            ms = system_state.run_ping(host, timeout=ping_timeout)
+        except Exception:
+            ms = None
+        return ms if isinstance(ms, (int, float)) else None
+
+    def _do_tcp(couple):
+        try:
+            return system_state.check_tcp_port(couple[0], couple[1], timeout=tcp_timeout)
+        except Exception:
+            return None
+
+    # Ping (par hôte) ET test de port (par couple) lancés ensemble dans le pool :
+    # tout le balayage s'effectue en une seule vague concurrente.
+    icmp, tcp = {}, {}
+    workers = max(1, min(_DEVICE_PROBE_WORKERS, len(hosts) + len(couples)))
+    submitted = {}
+    with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as ex:
+        for h in hosts:
+            submitted[ex.submit(_do_ping, h)] = ("icmp", h)
+        for c in couples:
+            submitted[ex.submit(_do_tcp, c)] = ("tcp", c)
+        for fut in concurrent.futures.as_completed(submitted):
+            kind, key = submitted[fut]
+            (icmp if kind == "icmp" else tcp)[key] = fut.result()
+
+    out = []
+    for t in targets:
+        host, port = t.get("host"), t.get("port")
+        icmp_ms = icmp.get(host)
+        tcp_ms = tcp.get((host, port))
+        tcp_ok = tcp_ms is not None
+        out.append({**t, "icmp_ok": icmp_ms is not None, "icmp_ms": icmp_ms,
+                    "tcp_ok": tcp_ok, "tcp_ms": tcp_ms,
+                    "reachable": tcp_ok, "tested": True})
+    return out
+
+
+def _device_label(d):
+    """Étiquette courte d'une cible pour les messages (adresse + 1er canal visé)."""
+    addr = d.get("address") or (f"{d.get('host')}:{d.get('port')}"
+                                if d.get("host") else "?")
+    conns = d.get("connectors") or []
+    who = conns[0].get("channel_name") if conns else None
+    extra = f" +{len(conns) - 1}" if len(conns) > 1 else ""
+    return addr + (f" ({who}{extra})" if who else "")
+
+
+def _format_device_detail(devices, what):
+    """Récapitulatif court (colonne `details` de l'évènement) des cibles."""
+    parts = [_device_label(d) for d in devices[:20]]
+    extra = f" +{len(devices) - 20}" if len(devices) > 20 else ""
+    return f"{len(devices)} peripherique(s) {what} : " + " ; ".join(parts) + extra
+
+
+def scheduled_device_check():
+    """Tâche programmée : teste la connectivité des cibles (host, port) Mirth.
+
+    Réutilise le contrat d'endpoint (mirth_api.get_connector_endpoints, mis en
+    cache). Ne teste QUE les couples ip/port, et jamais deux fois la même IP.
+    Historise l'état courant (device_status) + l'agrégat du tick (device_history),
+    rafraîchit la ligne d'état console, puis émet les alarmes de transition.
+    """
+    global _device_endpoints_cache, _device_endpoints_tick, _device_last_summary
+    # 1. (Re)lecture de la config des connecteurs (cache module, rafraîchi par N).
+    if (_device_endpoints_cache is None
+            or _device_endpoints_tick % _DEVICE_ENDPOINTS_REFRESH_EVERY == 0):
+        ov = mirth_api.get_connector_endpoints(timeout=8)
+        if ov.get("reachable"):
+            _device_endpoints_cache = ov.get("endpoints", [])
+    _device_endpoints_tick += 1
+
+    targets = _device_targets(_device_endpoints_cache or [])
+    ts = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    devices = _probe_targets(targets)
+    online = sum(1 for d in devices if d.get("reachable") is True)
+    offline = sum(1 for d in devices if d.get("reachable") is False)
+
+    # 2. Persistance : état courant (recap + référence d'alarme) + point de série.
+    database.upsert_device_status(devices, timestamp=ts)
+    database.insert_device_history(timestamp=ts, total=len(devices), online=online,
+                                   offline=offline, detail=devices)
+
+    # 3. Ligne d'état console : résumé compact accolé au collecteur (OK:n/KO:m).
+    _device_last_summary = (f"(OK:{online}/KO:{offline})" if devices
+                            else "(aucune cible)")
+
+    # 4. Détection des transitions (alarmes), clé = (host, port).
+    _detect_device_transitions(devices, ts)
+
+
+def _detect_device_transitions(devices, ts):
+    """Diffe les cibles injoignables vs le tick précédent et émet les alarmes.
+
+    Clé = (host, port) — un périphérique, pas un connecteur — pour éviter les
+    doublons. 1er tick / post-redémarrage : baseline silencieuse (pas d'alarme).
+    """
+    global _device_down_prev
+    down_now, up_now = {}, {}
+    for d in devices:
+        if not d.get("tested"):
+            continue
+        key = (d.get("host"), d.get("port"))
+        if d.get("reachable") is False:
+            down_now[key] = d
+        elif d.get("reachable") is True:
+            up_now[key] = d
+    down_keys = set(down_now.keys())
+
+    if _device_down_prev is None:
+        _device_down_prev = down_keys
+        return
+
+    new_down = down_keys - _device_down_prev
+    recovered = _device_down_prev - down_keys
+    _device_down_prev = down_keys
+
+    if new_down:
+        affected = [down_now[k] for k in new_down]
+        detail = _format_device_detail(affected, "injoignable(s)")
+        log.log("[checker_service] Alerte : " + detail)
+        emit_alarm("device_unreachable", timestamp=ts, detail=detail,
+                   context={"devices": affected})
+    if recovered:
+        # Retour en ligne : seulement les cibles re-sondées joignables ce tick (une
+        # cible disparue de la config sort aussi du set, sans déclencher d'alarme « up »).
+        affected = [up_now[k] for k in recovered if k in up_now]
+        if affected:
+            detail = _format_device_detail(affected, "de retour en ligne")
+            log.log("[checker_service] Alerte : " + detail)
+            emit_alarm("device_up", timestamp=ts, detail=detail,
+                       context={"devices": affected})
+
+
 def mark_startup_events():
     """Au démarrage du service, matérialise dans la base les interruptions afin
     qu'elles soient visibles sur le graphe (la courbe se brise sur ces points) :
@@ -788,18 +1041,23 @@ def make_scheduler_status_line(tasks):
     ``lib.log.status``, qui réécrit la ligne en place) la durée de la dernière
     exécution de CHAQUE tâche, sous la forme :
 
-        [metrics-collector] 0.213s / [mirth-collector] 1.041s / [mirth-overview-collector] -----
+        [metrics-collector] 0.213s / [mirth-collector] 1.041s / [device-ping-collector] 0.812s (OK:1/KO:2)
 
-    Une tâche qui n'a pas encore tourné est affichée « ----- ». La sérialisation
-    (verrou) et la cohabitation avec les logs persistants sont gérées par
-    ``lib.log`` ; inactif hors terminal.
+    Une tâche qui n'a pas encore tourné est affichée « ----- ». Le collecteur de
+    périphériques porte en suffixe un résumé compact de son dernier balayage
+    (OK = cibles en ligne / KO = en erreur, cf. ``_device_last_summary``). La
+    sérialisation (verrou) et la cohabitation avec les logs persistants sont gérées
+    par ``lib.log`` ; inactif hors terminal.
     """
     def render(_task=None):
         parts = []
         for t in tasks:
             d = t.last_duration
-            parts.append(f"[{t.name}] {d:.3f}s" if d is not None
-                         else f"[{t.name}] -----")
+            seg = f"[{t.name}] {d:.3f}s" if d is not None else f"[{t.name}] -----"
+            # Résumé de connectivité accolé au collecteur de périphériques.
+            if t.name == DEVICE_TASK_NAME and _device_last_summary:
+                seg += " " + _device_last_summary
+            parts.append(seg)
         log.status(" / ".join(parts))
 
     return render
@@ -2043,6 +2301,55 @@ def api_devices_probe(req):
             "probed_at": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")}
 
 
+def api_devices(req):
+    """Dernier état historisé de chaque cible (host, port) — sans appel réseau.
+
+    Servi depuis `device_status` (alimenté par le collecteur `device-ping-collector`).
+    Tableau récapitulatif des derniers tests : chaque cible porte ses résultats
+    ICMP/port TCP, son état, et la liste des canaux/connecteurs qui la visent.
+    """
+    devices = database.get_device_status()
+    online = sum(1 for d in devices if d.get("reachable") is True)
+    offline = sum(1 for d in devices if d.get("reachable") is False)
+    updated = max((d.get("updated_at") or "" for d in devices), default=None)
+    return {"count": len(devices), "online": online, "offline": offline,
+            "updated_at": updated or None, "devices": devices}
+
+
+def api_devices_history(req):
+    """Série temporelle agrégée pour le graphe « clients Mirth » (2 courbes).
+
+    Chaque point : {timestamp, total, online (connexions actives), offline
+    (connexions en erreur)}. Mêmes conventions que /api/history : ?date_deb=&date_fin=
+    (intervalle, prioritaire) ou ?hours=24 (0 => tout l'historique).
+    """
+    date_deb = (req.get("date_deb") or "").strip() or None
+    date_fin = (req.get("date_fin") or "").strip() or None
+    if date_deb or date_fin:
+        rows = database.get_device_history(date_deb=date_deb, date_fin=date_fin)
+        return {"date_deb": date_deb, "date_fin": date_fin,
+                "count": len(rows), "samples": rows}
+    try:
+        hours = float(req.get("hours", 24))
+    except ValueError:
+        hours = 24
+    rows = database.get_device_history(hours=hours)
+    return {"hours": hours, "count": len(rows), "samples": rows}
+
+
+def api_devices_history_at(req):
+    """Détail (par cible) d'un point précis de la courbe, par horodatage.
+
+    Paramètre ?ts=YYYY-MM-DD HH:MM:SS (horodatage exact du relevé, tel que renvoyé
+    par /api/devices/history). Renvoie {timestamp, total, online, offline, devices}
+    — les résultats par cible figés à ce tick (clic sur un point du graphe).
+    """
+    ts = (req.get("ts") or "").strip()
+    if not ts:
+        return (400, {"error": "ts requis (YYYY-MM-DD HH:MM:SS)"})
+    return database.get_device_history_at(ts)
+
+
 def build_router(tasks, started_at):
     router = webserver.Router(static_dir=WEB_DIR, index_route="/",
                               json_transform=_round_floats)
@@ -2098,6 +2405,10 @@ def build_router(tasks, started_at):
     router.get("/api/mirth/endpoints", api_mirth_endpoints)
     router.get("/api/devices/probe", api_devices_probe)
     router.get("/api/devices/probe-one", api_devices_probe_one)
+    # Supervision périphériques historisée (collecteur device-ping)
+    router.get("/api/devices", api_devices)
+    router.get("/api/devices/history", api_devices_history)
+    router.get("/api/devices/history/at", api_devices_history_at)
     router.get("/api/getmirthinfo", api_getmirthinfo)
 
     # API email
@@ -2177,6 +2488,7 @@ def main():
         RecurringTask(args.interval, scheduled_check, name="metrics-collector"),
         RecurringTask(args.interval, scheduled_mirth_check, name="mirth-collector"),
         RecurringTask(args.interval, scheduled_mirth_overview, name="mirth-overview-collector"),
+        RecurringTask(args.interval, scheduled_device_check, name=DEVICE_TASK_NAME),
     ]
     # Ligne d'état console auto-écrasée : durée de la dernière exécution de chaque
     # tâche, rafraîchie à chaque fin d'exécution (hook on_complete partagé).
