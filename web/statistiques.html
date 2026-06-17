@@ -128,6 +128,15 @@
         .devices-list { max-height: calc(100vh - 200px); overflow: auto; padding: 14px 20px; }
         .devices-list .mtable { width: 100%; }
         .devices-list tr.offnet td { opacity: .55; }   /* connecteurs non réseau grisés */
+        .devices-list tr.testing td { background: color-mix(in srgb, var(--accent) 7%, transparent); }
+        /* Petit spinner par cellule : un connecteur en cours de test « à la volée » */
+        .mini-spinner {
+            display: inline-block; width: 13px; height: 13px; vertical-align: -2px;
+            border-radius: 50%;
+            border: 2px solid color-mix(in srgb, var(--muted) 30%, transparent);
+            border-top-color: var(--accent);
+            animation: spin .7s linear infinite;
+        }
     </style>
 </head>
 <body>
@@ -230,8 +239,7 @@
                     <span id="devices-summary">Chargement…</span>
                     <input id="devices-filter" type="text" placeholder="Filtrer (canal, hôte, transport…)"
                            style="margin-left:auto;max-width:240px" title="Filtrer la liste">
-                    <button id="devices-rescan" title="Relire la configuration des connecteurs (sans tester)">⟳ Rescanner</button>
-                    <button id="devices-reload" title="Relancer le test ICMP + port TCP">↻ Tester</button>
+                    <button id="devices-rescan" title="Relire la configuration des connecteurs et tester la connectivité (ICMP + port TCP)">⟳ Rescanner</button>
                 </div>
                 <div class="devices-list" id="devices-list"></div>
             </div>
@@ -1137,10 +1145,15 @@ function populateThroughputScope(channels) {
     for (const c of channels) {
         const cid = c.channel_id;
         if (!cid) continue;
-        html += `<option value="${escapeHtml(cid)}">📡 ${escapeHtml(c.name || cid)}</option>`;
+        // Canal : en gras pour le distinguer visuellement de ses connecteurs.
+        html += `<option value="${escapeHtml(cid)}" style="font-weight:700">📡 ${escapeHtml(c.name || cid)}</option>`;
         for (const conn of (c.connectors || [])) {
-            const role = conn.meta_data_id === 0 ? "Source" : "Destination " + conn.meta_data_id;
-            html += `<option value="${escapeHtml(cid)}:${conn.meta_data_id}">&nbsp;&nbsp;↳ ${escapeHtml(conn.name || role)} (${role})</option>`;
+            // Source (metaDataId 0) = connecteur entrant (In) → vert ;
+            // destinations (metaDataId >= 1) = connecteurs sortants (Out) → rouge.
+            const isSource = conn.meta_data_id === 0;
+            const role = isSource ? "Source (In)" : "Destination " + conn.meta_data_id + " (Out)";
+            const color = isSource ? "#22c55e" : "#ef4444";
+            html += `<option value="${escapeHtml(cid)}:${conn.meta_data_id}" style="color:${color}">&nbsp;&nbsp;↳ ${escapeHtml(conn.name || role)} (${role})</option>`;
         }
     }
     sel.innerHTML = html;
@@ -1484,63 +1497,173 @@ document.getElementById("errors-modal").addEventListener("click", e => {
 // ============ MODALE : CONNECTIVITÉ DES PÉRIPHÉRIQUES (ping ICMP + port TCP) ============
 // Dernier balayage en mémoire (sert au filtre client sans re-sonder le réseau).
 let devicesData = [];
+// Jeton d'annulation : chaque (re)lancement l'incrémente ; les sondes en vol d'un
+// scan précédent vérifient ce jeton et abandonnent leur résultat s'il a changé.
+let probeSeq = 0;
 
 function openDevicesModal() {
     document.getElementById("devices-modal").classList.add("open");
     document.getElementById("devices-filter").value = "";
-    probeDevices(false);   // ouvre directement sur un test de connectivité
+    probeDevices();   // ouvre directement sur un test de connectivité
 }
-function closeDevicesModal() { document.getElementById("devices-modal").classList.remove("open"); }
+function closeDevicesModal() {
+    probeSeq++;            // stoppe la prise en compte des sondes en cours
+    document.getElementById("devices-modal").classList.remove("open");
+}
 
-// rescanOnly=true : relit la config (rapide, sans ping/port) ; false : balayage complet.
-async function probeDevices(rescanOnly) {
+// Charge la liste des connecteurs (config Mirth, rapide), l'affiche AUSSITÔT, puis
+// sonde chaque équipement « à la volée » via /api/devices/probe-one (un spinner par
+// ligne, mise à jour au fil de l'eau).
+async function probeDevices() {
     const list = document.getElementById("devices-list");
     const summary = document.getElementById("devices-summary");
-    summary.textContent = rescanOnly ? "Lecture de la configuration…"
-                                     : "Test de connectivité (ICMP + port TCP)…";
+    const mySeq = ++probeSeq;   // invalide les sondes d'un éventuel scan précédent
+    summary.textContent = "Lecture de la configuration…";
     list.innerHTML = '<div style="display:flex;justify-content:center;padding:40px"><div class="spinner"></div></div>';
-    const url = rescanOnly ? `${API}/api/mirth/endpoints` : `${API}/api/devices/probe`;
     try {
-        const r = await fetch(url);
+        const r = await fetch(`${API}/api/mirth/endpoints`);
         const d = await r.json();
+        if (mySeq !== probeSeq) return;   // un scan plus récent a démarré : on abandonne
         if (!d.reachable) {
             devicesData = [];
             summary.textContent = "API Mirth injoignable.";
             list.innerHTML = `<div class="muted-note">${escapeHtml(d.error || "Serveur Mirth injoignable.")}</div>`;
             return;
         }
-        devicesData = d.devices || d.endpoints || [];
-        if (rescanOnly) {
-            summary.textContent = `${devicesData.length} connecteur(s) — configuration relue ` +
-                `(cliquez « Tester » pour vérifier la connectivité).`;
-        } else {
-            summary.textContent = `${d.online || 0} en ligne · ${d.offline || 0} hors ligne · ` +
-                `${d.untested || 0} non testé(s)` + (d.probed_at ? ` — ${d.probed_at}` : "");
-        }
-        drawDevicesTable();
+        // État initial : non testé. On garde un index stable (_idx) pour cibler la
+        // bonne ligne lors des mises à jour incrémentales, même après filtrage.
+        devicesData = (d.endpoints || []).map((ep, i) => Object.assign({}, ep, {
+            _idx: i, tested: false, testing: false,
+            icmp_ok: null, icmp_ms: null, tcp_ok: null, tcp_ms: null, reachable: null,
+        }));
+        drawDevicesTable();   // affichage immédiat des données
+        runProbes(mySeq);     // lance les tests réseau en tâche de fond
     } catch (e) {
+        if (mySeq !== probeSeq) return;
         devicesData = [];
         summary.textContent = "Erreur de requête.";
         list.innerHTML = `<div class="muted-note">${escapeHtml(e.message)}</div>`;
     }
 }
 
+// Clé de dé-doublonnage d'une cible : un même (hôte, port) visé par plusieurs
+// connecteurs n'est sondé qu'une fois ; le verdict est appliqué à toutes ses lignes.
+function probeKey(dev) { return dev.port != null ? `${dev.host}|${dev.port}` : `${dev.host}`; }
+
+function devicesCounts() {
+    return {
+        online: devicesData.filter(d => d.reachable === true).length,
+        offline: devicesData.filter(d => d.reachable === false).length,
+        testing: devicesData.filter(d => d.testing).length,
+    };
+}
+
+// Sonde les équipements réseau l'un après l'autre (concurrence bornée) et met à jour
+// chaque ligne dès que son verdict arrive — sans bloquer l'affichage déjà rendu.
+async function runProbes(mySeq) {
+    const summary = document.getElementById("devices-summary");
+    const targets = devicesData.filter(d => d.pingable);   // seuls les connecteurs réseau
+    if (!targets.length) {
+        summary.textContent = `${devicesData.length} connecteur(s) — aucun équipement réseau à tester.`;
+        return;
+    }
+    // Marque les cibles « en cours » et regroupe par (hôte, port) pour ne sonder
+    // chaque équipement qu'une fois.
+    const groups = new Map();
+    for (const d of targets) {
+        d.testing = true;
+        const k = probeKey(d);
+        if (!groups.has(k)) groups.set(k, []);
+        groups.get(k).push(d);
+    }
+    drawDevicesTable();   // affiche tous les spinners d'un coup
+
+    const keys = [...groups.keys()];
+    let done = 0;
+    const refreshSummary = (final) => {
+        const c = devicesCounts();
+        summary.textContent = final
+            ? `${c.online} en ligne · ${c.offline} hors ligne · ` +
+              `${devicesData.length - c.online - c.offline} non testé(s) — ${new Date().toLocaleTimeString()}`
+            : `Test en cours… ${done}/${keys.length} équipement(s) — ` +
+              `${c.online} en ligne · ${c.offline} hors ligne`;
+    };
+    refreshSummary(false);
+
+    // Sonde une cible puis applique son verdict à toutes les lignes qui la partagent.
+    const probeOne = async (key) => {
+        const devs = groups.get(key);
+        const sample = devs[0];
+        const qs = new URLSearchParams({ host: sample.host });
+        if (sample.port != null) qs.set("port", sample.port);
+        let res;
+        try {
+            const r = await fetch(`${API}/api/devices/probe-one?${qs}`);
+            res = await r.json();
+        } catch (e) {
+            res = { tested: true, icmp_ok: false, icmp_ms: null, tcp_ok: null, tcp_ms: null, reachable: false };
+        }
+        if (mySeq !== probeSeq) return;   // scan annulé entre-temps
+        for (const d of devs) {
+            Object.assign(d, {
+                tested: true, testing: false,
+                icmp_ok: res.icmp_ok, icmp_ms: res.icmp_ms,
+                tcp_ok: res.tcp_ok, tcp_ms: res.tcp_ms, reachable: res.reachable,
+            });
+            updateDeviceRow(d);
+        }
+        done++;
+        refreshSummary(false);
+    };
+
+    // Pool de sondes concurrentes : un hôte lent/injoignable ne bloque pas les autres.
+    const POOL = Math.min(6, keys.length);
+    let next = 0;
+    const worker = async () => {
+        while (next < keys.length && mySeq === probeSeq) {
+            await probeOne(keys[next++]);
+        }
+    };
+    await Promise.all(Array.from({ length: POOL }, worker));
+    if (mySeq !== probeSeq) return;
+    refreshSummary(true);
+}
+
 function devIcmpCell(dev) {
-    if (!dev.pingable || !dev.tested) return '<span class="muted">—</span>';
+    if (!dev.pingable) return '<span class="muted">—</span>';
+    if (dev.testing) return '<span class="mini-spinner" title="Test ICMP en cours…"></span>';
+    if (!dev.tested) return '<span class="muted">—</span>';
     if (dev.icmp_ok) return `<span class="badge on">${escapeHtml(dev.icmp_ms)} ms</span>`;
     return '<span class="badge off">✗</span>';
 }
 function devTcpCell(dev) {
-    if (dev.port == null || !dev.tested || dev.tcp_ok == null) return '<span class="muted">—</span>';
+    if (dev.port == null) return '<span class="muted">—</span>';
+    if (dev.testing) return '<span class="mini-spinner" title="Test du port TCP en cours…"></span>';
+    if (!dev.tested || dev.tcp_ok == null) return '<span class="muted">—</span>';
     return dev.tcp_ok
         ? `<span class="badge on">ouvert${dev.tcp_ms != null ? " " + escapeHtml(dev.tcp_ms) + " ms" : ""}</span>`
         : '<span class="badge off">fermé</span>';
 }
 function devStateCell(dev) {
     if (!dev.pingable) return '<span class="badge idle">non-réseau</span>';
+    if (dev.testing) return '<span class="badge idle"><span class="mini-spinner"></span> test…</span>';
     if (!dev.tested) return '<span class="badge idle">non testé</span>';
     return dev.reachable ? '<span class="badge on">● en ligne</span>'
                          : '<span class="badge off">● hors ligne</span>';
+}
+
+// Met à jour en place les seules cellules variables d'une ligne (ICMP / TCP / État),
+// sans re-rendre tout le tableau : préserve le scroll et évite le clignotement.
+function updateDeviceRow(dev) {
+    const tr = document.querySelector(`#devices-list tr[data-idx="${dev._idx}"]`);
+    if (!tr) return;   // ligne masquée par le filtre courant
+    tr.classList.toggle("testing", !!dev.testing);
+    const icmp = tr.querySelector(".cell-icmp");
+    const tcp = tr.querySelector(".cell-tcp");
+    const st = tr.querySelector(".cell-state");
+    if (icmp) icmp.innerHTML = devIcmpCell(dev);
+    if (tcp) tcp.innerHTML = devTcpCell(dev);
+    if (st) st.innerHTML = devStateCell(dev);
 }
 
 function drawDevicesTable() {
@@ -1555,15 +1678,17 @@ function drawDevicesTable() {
     }
     const body = rows.map(dev => {
         const role = dev.role === "source" ? "Source" : "Destination";
-        return `<tr class="${dev.pingable ? "" : "offnet"}">
+        const cls = [dev.pingable ? "" : "offnet", dev.testing ? "testing" : ""]
+            .filter(Boolean).join(" ");
+        return `<tr data-idx="${dev._idx}"${cls ? ` class="${cls}"` : ""}>
             <td>${escapeHtml(dev.channel_name || "—")}</td>
             <td>${escapeHtml(dev.name || "—")} <span class="conn-role">${role}</span></td>
             <td>${escapeHtml(dev.transport || "—")}</td>
             <td>${escapeHtml(dev.host || "—")}</td>
             <td class="num">${dev.port != null ? escapeHtml(dev.port) : "—"}</td>
-            <td>${devIcmpCell(dev)}</td>
-            <td>${devTcpCell(dev)}</td>
-            <td>${devStateCell(dev)}</td>
+            <td class="cell-icmp">${devIcmpCell(dev)}</td>
+            <td class="cell-tcp">${devTcpCell(dev)}</td>
+            <td class="cell-state">${devStateCell(dev)}</td>
         </tr>`;
     }).join("");
     list.innerHTML = `<table class="mtable"><thead><tr>
@@ -1574,8 +1699,7 @@ function drawDevicesTable() {
 
 document.getElementById("openDevices").addEventListener("click", openDevicesModal);
 document.getElementById("closeDevices").addEventListener("click", closeDevicesModal);
-document.getElementById("devices-reload").addEventListener("click", () => probeDevices(false));
-document.getElementById("devices-rescan").addEventListener("click", () => probeDevices(true));
+document.getElementById("devices-rescan").addEventListener("click", () => probeDevices());
 document.getElementById("devices-filter").addEventListener("input", drawDevicesTable);
 document.getElementById("devices-modal").addEventListener("click", e => {
     if (e.target.id === "devices-modal") closeDevicesModal();   // clic sur le fond
