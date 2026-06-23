@@ -76,7 +76,13 @@ echo [INFO] Compilation des scripts...
 %PYINSTALLER%  --onefile --add-data ".mirth_config.py;." mirth_simulator.py
 %PYINSTALLER%  --onefile --add-data ".smtp_config.py;." quickmail.py
 %PYINSTALLER%  --onefile --add-data ".smtp_config.py;." mirth_logs_parser.py
-%PYINSTALLER%  --onefile --add-data ".smtp_config.py;." --add-data ".mirth_config.py;." checker_service.py
+REM --collect-submodules rich : embarque TOUS les sous-modules de rich, dont
+REM ceux importés paresseusement (rich._win32_console pour la console Windows
+REM "legacy" d'un .exe lancé par double-clic). Sans ça, l'analyse statique de
+REM PyInstaller les rate : le thread de rendu de rich.live plante (ModuleNotFound)
+REM et le tableau de bord reste un ecran noir. --add-data "web;web" embarque les
+REM pages statiques (servies depuis sys._MEIPASS en mode gele).
+%PYINSTALLER%  --onefile --collect-submodules rich --add-data ".smtp_config.py;." --add-data ".mirth_config.py;." --add-data "web;web" checker_service.py
 echo.
 echo [OK] Compilation terminee !
 

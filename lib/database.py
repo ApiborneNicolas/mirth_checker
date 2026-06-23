@@ -13,6 +13,7 @@ threads du serveur web (mode WAL activé).
 
 import os
 import io
+import sys
 import csv
 import json
 import shutil
@@ -21,11 +22,16 @@ import datetime
 import tempfile
 import threading
 
-# Emplacement par défaut de la base : à la racine du projet (un niveau au-dessus de lib/)
-DEFAULT_DB_PATH = os.path.join(
-    os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-    "checker_history.db"
-)
+# Emplacement par défaut de la base : à la racine du projet (un niveau au-dessus de
+# lib/) en exécution normale ; à côté de l'exécutable en build gelé (PyInstaller).
+# En --onefile, __file__ pointe dans le dossier temporaire _MEIxxxx (effacé à la
+# sortie) : y écrire la base la perdrait à chaque arrêt. On vise donc le dossier de
+# l'exe (sys.executable), persistant et accessible en écriture.
+if getattr(sys, "frozen", False):
+    _DB_BASE_DIR = os.path.dirname(os.path.abspath(sys.executable))
+else:
+    _DB_BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+DEFAULT_DB_PATH = os.path.join(_DB_BASE_DIR, "checker_history.db")
 
 # Tables de relevés partageant le même schéma et les mêmes fonctions d'accès :
 #   - 'metrics'        : relevés système de la machine hôte ;

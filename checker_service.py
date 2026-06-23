@@ -46,7 +46,10 @@ import mirth_api
 import quickmail
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-WEB_DIR = os.path.join(BASE_DIR, "web")
+# Pages statiques (web/) : ressource en lecture seule. En build gelé (PyInstaller),
+# elles sont embarquées dans le dossier temporaire d'extraction sys._MEIPASS
+# (cf. --add-data "web;web" dans _compilation.bat) ; sinon, web/ à côté du script.
+WEB_DIR = os.path.join(getattr(sys, "_MEIPASS", BASE_DIR), "web")
 # Emplacement standard du log serveur de Mirth Connect sous Windows.
 DEFAULT_LOGFILE = r"C:\Program Files\Mirth Connect\logs\mirth.log"
 
