@@ -74,6 +74,19 @@
         .err-link:hover { background: color-mix(in srgb, var(--err) 16%, transparent); }
         .totals-row .err-link { color: var(--err); }
 
+        /* Bouton « repère » des KPI cumulés (Total reçus / Total erreurs) :
+           mémorise les totaux actuels pour afficher l'écart depuis ce repère. */
+        .kpi-mark {
+            margin-left: auto; background: none; border: none; cursor: pointer;
+            padding: 2px 5px; border-radius: 6px; font-size: 14px; line-height: 1;
+            opacity: .5; filter: grayscale(.4);
+            transition: opacity .15s ease, background .15s ease, filter .15s ease;
+        }
+        .kpi-mark:hover { opacity: 1; filter: none;
+                          background: color-mix(in srgb, var(--text) 10%, transparent); }
+        .kpi-mark.active { opacity: 1; filter: none; }
+        .kpi-mark:disabled { cursor: default; opacity: .3; }
+
         /* Lignes de connecteurs (sous-canaux) dépliables sous chaque canal */
         .chan-row.expandable .chan-name { cursor: pointer; user-select: none; }
         .chan-caret { display: inline-block; width: 12px; color: var(--muted);
@@ -283,12 +296,18 @@
     <section class="tab-pane active" id="tab-api" role="tabpanel" aria-label="Mirth API">
     <div class="cards" id="mirth-kpis">
         <div class="card">
-            <div class="label"><span class="dot" style="background:var(--cpu)"></span>Total reçus</div>
+            <div class="label" style="display:flex;align-items:center;gap:6px"><span class="dot" style="background:var(--cpu)"></span>Total reçus
+                <button class="kpi-mark" id="kpi-received-mark" type="button"
+                        title="Fixer un repère : mémoriser les totaux cumulés actuels pour afficher l'écart (actuel − repère). Recliquer remet le repère à « maintenant ».">🔖</button>
+            </div>
             <div class="value" id="kpi-received">—</div>
             <div class="sub" id="kpi-received-sub">tous canaux confondus</div>
         </div>
         <div class="card">
-            <div class="label"><span class="dot" style="background:var(--err)"></span>Total erreurs</div>
+            <div class="label" style="display:flex;align-items:center;gap:6px"><span class="dot" style="background:var(--err)"></span>Total erreurs
+                <button class="kpi-mark" id="kpi-errors-mark" type="button"
+                        title="Fixer un repère : mémoriser les totaux cumulés actuels pour afficher l'écart (actuel − repère). Recliquer remet le repère à « maintenant ».">🔖</button>
+            </div>
             <div class="value" id="kpi-errors">—</div>
             <div class="sub" id="kpi-errors-sub"></div>
         </div>
@@ -405,7 +424,7 @@
             <label class="logs-field" style="flex:1 1 280px">
                 <span class="field-label">Fichier de log (vide = fichier serveur par défaut)</span>
                 <input type="text" id="logs-file"
-                       placeholder="C:\Program Files\Mirth Connect\logs\mirthconnect.log"
+                       placeholder="C:\Program Files\Mirth Connect\logs\mirth.log"
                        title="Chemin du fichier à analyser ; laissez vide pour le fichier par défaut du serveur">
             </label>
             <label class="logs-field">
@@ -419,7 +438,7 @@
                 </select>
             </label>
             <label class="switch-row" style="align-self:flex-end;height:38px"
-                   title="Inclure aussi les fichiers d'archive logrotate (mirthconnect.log.1, .2, …)">
+                   title="Inclure aussi les fichiers d'archive logrotate (mirth.log.1, .2, …)">
                 <input type="checkbox" id="logs-rotate"> Fichiers archivés
             </label>
             <button id="logs-analyze" class="primary" style="align-self:flex-end"
@@ -1225,19 +1244,114 @@ async function fetchMirthProcess() {
     } catch (e) { /* ignore */ }
 }
 
+// État courant des compteurs cumulés Mirth + repère (baseline) enregistré. Les
+// compteurs Mirth étant cumulatifs, le repère sert à afficher l'écart (actuel −
+// repère) en gros tout en conservant la valeur réelle cumulée en petit.
+let kpiCurrent  = { received: null, error: null };
+let kpiBaseline = { received: null, error: null, saved_at: null };
+
+// Entier formaté avec séparateur de milliers (fr-FR), ou « — » si indisponible.
+function kpiFmt(v) {
+    return (v === null || v === undefined || typeof v !== "number")
+        ? "—" : v.toLocaleString("fr-FR");
+}
+
+// Affiche les deux KPI cumulés (reçus / erreurs) selon l'état du repère :
+//   - repère posé  : gros = écart (actuel − repère), petit = « cumul X · repère … »
+//   - sans repère  : gros = valeur cumulée, petit = libellé d'origine
+function renderKpiCounters() {
+    const stamp = kpiBaseline.saved_at
+        ? luxon.DateTime.fromFormat(kpiBaseline.saved_at, "yyyy-MM-dd HH:mm:ss").toFormat("dd/MM HH:mm")
+        : null;
+
+    const renderOne = (valId, subId, cur, base, defaultSub, isError) => {
+        const valEl = document.getElementById(valId);
+        const subEl = document.getElementById(subId);
+        const curNum = (typeof cur === "number");
+        const hasBaseline = (typeof base === "number") && curNum;
+        if (hasBaseline) {
+            const delta = cur - base;
+            valEl.textContent = (delta >= 0 ? "+" : "") + kpiFmt(delta);
+            subEl.textContent = "cumul " + kpiFmt(cur) + (stamp ? " · repère " + stamp : "");
+            if (isError) valEl.style.color = delta > 0 ? "var(--err)" : "";
+            else valEl.style.color = "";
+        } else {
+            valEl.textContent = kpiFmt(cur);
+            if (isError) {
+                valEl.style.color = (curNum && cur > 0) ? "var(--err)" : "";
+                subEl.textContent = !curNum ? "" : (cur > 0 ? "à surveiller" : defaultSub);
+            } else {
+                valEl.style.color = "";
+                subEl.textContent = defaultSub;
+            }
+        }
+    };
+
+    renderOne("kpi-received", "kpi-received-sub", kpiCurrent.received,
+              kpiBaseline.received, "tous canaux confondus", false);
+    renderOne("kpi-errors", "kpi-errors-sub", kpiCurrent.error,
+              kpiBaseline.error, "aucune erreur", true);
+
+    // Les deux boutons reflètent l'existence d'un repère (icône « active »).
+    for (const id of ["kpi-received-mark", "kpi-errors-mark"]) {
+        const b = document.getElementById(id);
+        if (b) b.classList.toggle("active", stamp !== null);
+    }
+}
+
+// Charge le repère KPI enregistré (au démarrage de la page).
+async function loadKpiBaseline() {
+    try {
+        const r = await fetch(`${API}/api/mirth/kpi-baseline`);
+        if (!r.ok) return;
+        const b = await r.json();
+        kpiBaseline = {
+            received: (typeof b.received === "number") ? b.received : null,
+            error:    (typeof b.error    === "number") ? b.error    : null,
+            saved_at: b.saved_at || null,
+        };
+        renderKpiCounters();
+    } catch (e) { /* pas de repère : on garde l'affichage cumulé */ }
+}
+
+// Fixe (ou re-fixe) le repère : mémorise les totaux cumulés actuels côté serveur
+// puis ré-affiche les deux KPI en mode « écart ».
+async function saveKpiBaseline() {
+    const btns = ["kpi-received-mark", "kpi-errors-mark"]
+        .map(id => document.getElementById(id)).filter(Boolean);
+    btns.forEach(b => b.disabled = true);
+    try {
+        const r = await fetch(`${API}/api/mirth/kpi-baseline`, { method: "POST" });
+        const d = await r.json().catch(() => ({}));
+        if (!r.ok || !d.ok) {
+            alert(d.error || "Impossible de fixer le repère (données Mirth indisponibles).");
+            return;
+        }
+        const b = d.baseline || {};
+        kpiBaseline = {
+            received: (typeof b.received === "number") ? b.received : null,
+            error:    (typeof b.error    === "number") ? b.error    : null,
+            saved_at: b.saved_at || null,
+        };
+        renderKpiCounters();
+    } catch (e) {
+        alert("Échec de l'enregistrement du repère : " + e.message);
+    } finally {
+        btns.forEach(b => b.disabled = false);
+    }
+}
+
 // Met à jour la ligne de KPI de l'onglet Mirth API (ou la réinitialise).
 function setMirthKpis(d) {
-    const num = v => (v === null || v === undefined) ? "—" : v;
-    const recv = document.getElementById("kpi-received");
-    const errs = document.getElementById("kpi-errors");
     const chans = document.getElementById("kpi-channels");
     const last = document.getElementById("kpi-lastapi");
     // Les KPI proviennent du dernier instantané historisé : on les affiche dès
     // qu'il existe (snapshot_at) OU qu'un appel live a abouti (repli au démarrage).
     const hasData = d && (d.snapshot_at || d.reachable);
     if (!hasData) {
-        recv.textContent = errs.textContent = chans.textContent = "—";
-        document.getElementById("kpi-errors-sub").textContent = "";
+        kpiCurrent = { received: null, error: null };
+        renderKpiCounters();
+        chans.textContent = "—";
         document.getElementById("kpi-channels-sub").textContent = "";
         last.textContent = "—";
         document.getElementById("kpi-lastapi-sub").textContent = "API injoignable";
@@ -1248,11 +1362,12 @@ function setMirthKpis(d) {
     const started = d.channels_started ?? 0;
     const total = d.channel_count ?? 0;
     const stopped = Math.max(total - started, 0);
-    recv.textContent = num(totals.received);
-    errs.textContent = num(totals.error);
-    errs.style.color = (typeof totals.error === "number" && totals.error > 0) ? "var(--err)" : "";
-    document.getElementById("kpi-errors-sub").textContent =
-        (typeof totals.error === "number" && totals.error > 0) ? "à surveiller" : "aucune erreur";
+    // Valeurs cumulées courantes → rendues (en gros ou en écart selon le repère).
+    kpiCurrent = {
+        received: (typeof totals.received === "number") ? totals.received : null,
+        error:    (typeof totals.error    === "number") ? totals.error    : null,
+    };
+    renderKpiCounters();
     chans.textContent = started + " / " + total;
     document.getElementById("kpi-channels-sub").textContent =
         stopped > 0 ? (stopped + " arrêté(s)") : "tous démarrés";
@@ -1871,6 +1986,10 @@ document.getElementById("devices-modal").addEventListener("click", e => {
 
 document.getElementById("refresh").addEventListener("click", loadFull);
 document.getElementById("range").addEventListener("change", () => { updateRangeSummary(); loadFull(); });
+// Bouton « repère » des KPI cumulés (présent sur les deux cartes, même action).
+document.getElementById("kpi-received-mark").addEventListener("click", saveKpiBaseline);
+document.getElementById("kpi-errors-mark").addEventListener("click", saveKpiBaseline);
+loadKpiBaseline();   // restaure le repère enregistré au chargement de la page
 // Changement de portée du graphe d'activité (global / canal / connecteur).
 document.getElementById("throughput-scope").addEventListener("change", loadThroughput);
 document.getElementById("autorefresh").addEventListener("change", () => { setupAuto(); updateRangeSummary(); });

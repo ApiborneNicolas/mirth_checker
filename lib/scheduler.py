@@ -55,6 +55,8 @@ class RecurringTask:
         self.run_count = 0
         self.last_duration = None      # durée (s) de la dernière exécution de func
         self.overruns = 0              # nb de cycles plus longs que l'intervalle
+        self.executing = False         # func() est en cours d'exécution (ce tick)
+        self._next_run_monotonic = None  # échéance (time.monotonic) du prochain relevé
 
     def _loop(self):
         # Grille de déclenchement absolue : chaque relevé est calé sur
@@ -67,6 +69,7 @@ class RecurringTask:
         next_run = anchor + self.start_delay
         if not self.run_immediately:
             next_run += self.interval
+        self._next_run_monotonic = next_run
 
         while not self._stop_event.is_set():
             # Attente interruptible jusqu'à l'échéance absolue du prochain relevé.
@@ -76,6 +79,7 @@ class RecurringTask:
             if self._stop_event.is_set():
                 break
 
+            self.executing = True
             start = time.monotonic()
             try:
                 self.func()
@@ -87,7 +91,9 @@ class RecurringTask:
                 # Logs persistants (effacent/redessinent la ligne d'état console).
                 log.log(f"[scheduler:{self.name}] Erreur : {e}")
                 log.log(traceback.format_exc(), newline=False)
-            self.last_duration = round(time.monotonic() - start, 4)
+            finally:
+                self.last_duration = round(time.monotonic() - start, 4)
+                self.executing = False
 
             # Hook de fin d'exécution (ligne d'état console, etc.). Toute erreur
             # ici est avalée pour ne pas interrompre la boucle de relevé.
@@ -112,6 +118,7 @@ class RecurringTask:
                 log.log(f"[scheduler:{self.name}] Dépassement : relevé plus long que "
                         f"l'intervalle {self.interval}s — {missed} créneau(x) sauté(s), "
                         f"resynchronisation sur la grille.")
+            self._next_run_monotonic = next_run
 
     def start(self):
         """Démarre la boucle dans un thread daemon. Sans effet si déjà lancée."""
@@ -132,12 +139,21 @@ class RecurringTask:
     def is_running(self):
         return self._thread is not None and self._thread.is_alive()
 
+    @property
+    def next_run_in(self):
+        """Secondes restantes avant le prochain relevé (None si pas encore planifié)."""
+        if self._next_run_monotonic is None:
+            return None
+        return max(0.0, self._next_run_monotonic - time.monotonic())
+
     def status(self):
         return {
             "name": self.name,
             "interval": self.interval,
             "start_delay": self.start_delay,
             "running": self.is_running,
+            "executing": self.executing,
+            "next_run_in": self.next_run_in,
             "run_count": self.run_count,
             "last_run": self.last_run,
             "last_error": self.last_error,

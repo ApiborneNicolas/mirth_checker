@@ -29,9 +29,48 @@ serait pas entièrement nettoyée).
 import sys
 import threading
 
+from . import dashboard as _dashboard_mod
+
 _lock = threading.Lock()
 _status = ""        # contenu courant de la ligne d'état (sans le \r de tête)
 _drawn_len = 0      # longueur de la ligne d'état réellement dessinée (pour l'effacer)
+
+# Tableau de bord rich actif (cf. start_dashboard). Quand il est posé, log()/
+# status()/clear() lui délèguent et l'affichage texte « ligne d'état » ci-dessous
+# est court-circuité ; sinon (rich absent / pas un terminal) on garde l'ancien
+# comportement.
+_dashboard = None
+
+
+def start_dashboard(tasks, title="Scheduler — tâches périodiques",
+                    summary_provider=None):
+    """Active le tableau de bord rich (tâches en haut, journal en bas).
+
+    `tasks` est la liste de `RecurringTask` à afficher (leur état est lu à chaque
+    frame). `summary_provider` est un callable optionnel `nom_tâche -> str |
+    (texte, style)` alimentant la colonne « Valeur ». Renvoie True si le tableau
+    de bord a démarré, False sinon (rich indisponible ou sortie non interactive)
+    — dans ce cas l'affichage texte classique reste en vigueur.
+    """
+    global _dashboard
+    dash = _dashboard_mod.RichDashboard(tasks, title=title,
+                                        summary_provider=summary_provider)
+    if dash.start():
+        _dashboard = dash
+        return True
+    return False
+
+
+def stop_dashboard():
+    """Arrête le tableau de bord rich et restaure l'écran normal du terminal.
+
+    Sans effet si aucun tableau de bord n'est actif. À appeler avant les derniers
+    messages d'arrêt pour qu'ils s'affichent sur l'écran restauré.
+    """
+    global _dashboard
+    if _dashboard is not None:
+        _dashboard.stop()
+        _dashboard = None
 
 
 def _stream():
@@ -71,6 +110,9 @@ def status(text):
     plus longue sont effacés. Sans effet si la sortie n'est pas un terminal.
     """
     global _status
+    if _dashboard is not None:
+        # La ligne d'état est remplacée par le tableau des tâches du tableau de bord.
+        return
     if not _enabled():
         return
     with _lock:
@@ -100,6 +142,12 @@ def log(text="", newline=True, refresh=False, statusline=None):
     la ligne d'état « flotte » toujours en bas.
     """
     global _status
+    if _dashboard is not None:
+        # `refresh` (ancienne maj de ligne d'état) est sans objet : le tableau des
+        # tâches s'auto-rafraîchit. Tout le reste va au journal du tableau de bord.
+        if not refresh:
+            _dashboard.log(text, newline=newline)
+        return
     if refresh:
         status(text)
         return
@@ -126,6 +174,8 @@ def clear():
     une ligne d'état orpheline en bas de l'écran.
     """
     global _status
+    if _dashboard is not None:
+        return
     if not _enabled():
         return
     with _lock:

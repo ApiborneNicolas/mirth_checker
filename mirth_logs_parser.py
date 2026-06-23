@@ -575,8 +575,8 @@ if __name__ == '__main__':
         parser.add_argument(
             "logfile",
             nargs="?",
-            default=r"C:\Program Files\Mirth Connect\logs\mirthconnect.log",
-            help=r"Path to the Mirth log file (default: C:\Program Files\Mirth Connect\logs\mirthconnect.log)"
+            default=r"C:\Program Files\Mirth Connect\logs\mirth.log",
+            help=r"Path to the Mirth log file (default: C:\Program Files\Mirth Connect\logs\mirth.log)"
         )
         parser.add_argument(
             "-d", "--date",

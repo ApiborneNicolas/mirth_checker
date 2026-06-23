@@ -50,7 +50,7 @@
         <h2>État de la base <span id="badge-state" class="badge b-muted">—</span></h2>
         <div class="meta" id="db-cards">
             <div class="cell"><div class="k">Taille fichier</div><div class="v" id="m-size">—</div></div>
-            <div class="cell"><div class="k">Relevés</div><div class="v" id="m-rows">—</div></div>
+            <div class="cell"><div class="k">Lignes (total)</div><div class="v" id="m-rows">—</div></div>
             <div class="cell"><div class="k">Journal WAL</div><div class="v" id="m-wal">—</div></div>
             <div class="cell"><div class="k">Mode journal</div><div class="v" id="m-mode">—</div></div>
             <div class="cell"><div class="k">Plus ancien</div><div class="v" id="m-oldest">—</div></div>
@@ -133,14 +133,15 @@
 
                 <div class="op-block">
                     <div class="op-title">Purger l'historique</div>
-                    <div class="op-desc">Supprime les relevés plus anciens que le nombre de jours indiqué.</div>
+                    <div class="op-desc">Supprime les relevés plus anciens que le nombre de jours indiqué (dans toutes les tables horodatées).</div>
                     <div class="row">
                         <div class="field">
                             <label for="purge-days">Conserver les N derniers jours</label>
-                            <input type="number" id="purge-days" value="30" min="0">
+                            <input type="number" id="purge-days" value="15" min="0">
                         </div>
                         <button id="btn-purge" class="warn">🧹 Purger</button>
                     </div>
+                    <div class="hint" id="retention-hint">—</div>
                 </div>
 
                 <div class="op-block">
@@ -167,6 +168,7 @@
 <script>
 const API = "";              // même origine que la page
 const $ = id => document.getElementById(id);
+let purgeInit = false;       // n'aligne le champ « purge » sur la rétention qu'une fois
 
 // ----------------------------------------------------------------------
 // Utilitaires
@@ -244,8 +246,8 @@ function renderInfo(d) {
 
     $("m-size").innerHTML = humanSize(d.file_size_bytes) +
         ` <small>(${d.page_count ?? "?"} pages)</small>`;
-    $("m-rows").innerHTML = (d.metrics_rows ?? 0).toLocaleString("fr-FR") +
-        ` <small>${d.metrics_valid ?? 0} relevés · ${d.metrics_events ?? 0} évts</small>`;
+    $("m-rows").innerHTML = (d.total_rows ?? 0).toLocaleString("fr-FR") +
+        ` <small>${(d.tables || []).length} tables · ${(d.metrics_rows ?? 0).toLocaleString("fr-FR")} système</small>`;
     $("m-wal").textContent = humanSize(d.wal_size_bytes);
     $("m-mode").textContent = (d.journal_mode || "—").toUpperCase();
     $("m-oldest").innerHTML = d.oldest ? `<small>${d.oldest}</small>` : "—";
@@ -274,6 +276,17 @@ function renderInfo(d) {
     $("pages-hint").textContent =
         `Page : ${humanSize(d.page_size)} · Pages libres : ${d.freelist_count ?? "?"} · ` +
         `Schéma v${d.schema_version ?? "?"} · Modifié : ${d.modified || "—"}`;
+
+    // Rétention automatique configurée côté service : politique affichée + valeur
+    // par défaut proposée à la purge manuelle (alignée une seule fois).
+    const rd = d.retention_days;
+    if (rd !== undefined && rd !== null) {
+        $("retention-hint").textContent = rd > 0
+            ? `Rétention automatique : ${rd} jour(s) — purge horaire des relevés plus anciens (réglable via --retention-days).`
+            : "Rétention automatique : illimitée (aucune purge auto).";
+        if (!purgeInit && rd > 0) { $("purge-days").value = rd; }
+        purgeInit = true;
+    }
 }
 
 // ----------------------------------------------------------------------

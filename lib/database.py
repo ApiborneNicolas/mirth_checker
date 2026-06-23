@@ -293,6 +293,23 @@ def init_db(db_path=DEFAULT_DB_PATH):
             """
         )
 
+        # Repère (baseline) des KPI cumulés de l'API Mirth (« Total reçus » /
+        # « Total erreurs »). Les compteurs Mirth sont cumulatifs depuis le
+        # démarrage du serveur ; cette table mémorise une photo des totaux à un
+        # instant T pour que la page statistiques affiche l'écart (actuel − repère)
+        # en gros et la valeur réelle en petit. Une seule ligne (id = 1), réécrite à
+        # chaque clic sur le bouton « repère ». Réglage persistant (non purgé).
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS mirth_kpi_baseline (
+                id          INTEGER PRIMARY KEY CHECK (id = 1),
+                received    INTEGER,
+                error       INTEGER,
+                saved_at    TEXT
+            )
+            """
+        )
+
         # ------------------------------------------------------------------
         # SUPERVISION DES PÉRIPHÉRIQUES (« clients Mirth ») — phase 3.
         # Un périphérique = une cible réseau UNIQUE (host, port) visée par un ou
@@ -1258,31 +1275,89 @@ def save_alert_config(methods=None, rules=None, db_path=DEFAULT_DB_PATH):
         conn.close()
 
 
+# ==========================================================================
+# REPÈRE DES KPI CUMULÉS MIRTH (table `mirth_kpi_baseline`)
+# Photo des totaux « reçus » / « erreurs » à un instant T, pour afficher l'écart
+# sur la page statistiques. Une seule ligne (id = 1) ; réglage persistant.
+# ==========================================================================
+def get_kpi_baseline(db_path=DEFAULT_DB_PATH):
+    """Retourne le repère KPI enregistré, ou None s'il n'a jamais été fixé.
+
+    Returns:
+        dict|None: {"received": int, "error": int, "saved_at": str} ou None.
+    """
+    conn = _connect(db_path)
+    try:
+        row = conn.execute(
+            "SELECT received, error, saved_at FROM mirth_kpi_baseline WHERE id = 1"
+        ).fetchone()
+    finally:
+        conn.close()
+    if not row:
+        return None
+    return {"received": row["received"], "error": row["error"],
+            "saved_at": row["saved_at"]}
+
+
+def set_kpi_baseline(received, error, timestamp=None, db_path=DEFAULT_DB_PATH):
+    """Mémorise (remplace) le repère des KPI cumulés Mirth.
+
+    Args:
+        received (int): total cumulé des messages reçus à mémoriser.
+        error (int): total cumulé des erreurs à mémoriser.
+        timestamp (str|None): horodatage du repère (défaut : maintenant).
+
+    Returns:
+        dict: le repère enregistré ({received, error, saved_at}).
+    """
+    now = timestamp or datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    conn = _connect(db_path)
+    try:
+        cur = conn.execute(
+            "UPDATE mirth_kpi_baseline SET received=?, error=?, saved_at=? WHERE id = 1",
+            (received, error, now))
+        if cur.rowcount == 0:
+            conn.execute(
+                "INSERT INTO mirth_kpi_baseline (id, received, error, saved_at) "
+                "VALUES (1, ?, ?, ?)", (received, error, now))
+        conn.commit()
+    finally:
+        conn.close()
+    return {"received": received, "error": error, "saved_at": now}
+
+
 def purge_older_than(days=30, db_path=DEFAULT_DB_PATH):
-    """Supprime les échantillons plus vieux que `days` jours. Retourne le nombre supprimé."""
+    """Supprime les relevés plus vieux que `days` jours dans toutes les tables
+    horodatées. Retourne le nombre TOTAL de lignes supprimées (toutes tables)."""
     cutoff = (datetime.datetime.now() - datetime.timedelta(days=days)).strftime(
         "%Y-%m-%d %H:%M:%S"
     )
     conn = _connect(db_path)
     try:
+        deleted = 0
         cur = conn.execute("DELETE FROM metrics WHERE timestamp < ?", (cutoff,))
+        deleted += cur.rowcount or 0
         # Mêmes rétentions pour les autres jeux de données horodatés par `timestamp`
-        # (relevés Mirth, débit, évènements/alertes). Tables possiblement absentes
-        # sur d'anciennes bases : on ignore l'erreur correspondante. (Le cache des
-        # messages en erreur `mirth_messages` est purgé par sa propre colonne plus bas.)
+        # (relevés Mirth, overview historisé, évènements/alertes, connectivité). Tables
+        # possiblement absentes sur d'anciennes bases : on ignore l'erreur. La dimension
+        # `mirth_entity` (stable, petite) et les tables de config/état courant
+        # (`device_status`, `alert_*`) ne sont jamais purgées. (Le cache des messages en
+        # erreur `mirth_messages` est purgé par sa propre colonne plus bas.)
         for tbl in ("mirth_metrics", "mirth_stats", "mirth_server", "events",
                     "device_history"):
             try:
-                conn.execute(f"DELETE FROM {tbl} WHERE timestamp < ?", (cutoff,))
+                cur = conn.execute(f"DELETE FROM {tbl} WHERE timestamp < ?", (cutoff,))
+                deleted += cur.rowcount or 0
             except sqlite3.Error:
                 pass
         # Cache des messages en erreur : rétention sur la date de réception du message.
         try:
-            conn.execute("DELETE FROM mirth_messages WHERE received_date < ?", (cutoff,))
+            cur = conn.execute("DELETE FROM mirth_messages WHERE received_date < ?", (cutoff,))
+            deleted += cur.rowcount or 0
         except sqlite3.Error:
             pass
         conn.commit()
-        return cur.rowcount
+        return deleted   # total de lignes supprimées, toutes tables confondues
     finally:
         conn.close()
 

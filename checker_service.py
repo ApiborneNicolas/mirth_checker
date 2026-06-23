@@ -19,7 +19,7 @@ Le service :
 
 Lancement :
     python checker_service.py [--host 0.0.0.0] [--port 8800] [--interval 60]
-                              [--logfile chemin] [--no-browser]
+                              [--logfile chemin]
                               [--mirth-url URL] [--mirth-user ID] [--mirth-password PW]
 """
 
@@ -48,10 +48,17 @@ import quickmail
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 WEB_DIR = os.path.join(BASE_DIR, "web")
 # Emplacement standard du log serveur de Mirth Connect sous Windows.
-DEFAULT_LOGFILE = r"C:\Program Files\Mirth Connect\logs\mirthconnect.log"
+DEFAULT_LOGFILE = r"C:\Program Files\Mirth Connect\logs\mirth.log"
 
 # Lecteur système surveillé pour le stockage (C:\ sous Windows, / sinon)
 SYSTEM_DRIVE = os.environ.get("SystemDrive", "C:") + os.sep if os.name == "nt" else "/"
+
+# Rétention max de l'historique en jours : les relevés plus anciens sont purgés
+# automatiquement (tâche périodique `retention-purge`). Réglée au démarrage par
+# main() depuis --retention-days. 0 = illimité (aucune purge automatique).
+RETENTION_DAYS = 15
+RETENTION_TASK_NAME = "retention-purge"
+RETENTION_PURGE_INTERVAL = 3600   # purge horaire (la rétention est exprimée en jours)
 
 # URL de base publique du service (ex. http://serveur:8800), utilisée pour bâtir
 # les liens profonds dans les e-mails d'alerte (ouverture du dashboard sur le
@@ -525,6 +532,27 @@ def emit_alarm(code, timestamp=None, dedup=False, detail=None, context=None):
 _mirth_prev_found = None
 
 
+# Valeur représentative de chaque tâche du planificateur, affichée dans la colonne
+# « Valeur » du tableau de bord console (cf. lib/dashboard.py). Chaque collecteur y
+# dépose, à la fin de son tick, un couple (texte, style_rich). Lecture mémoire pure :
+# aucun accès DB/réseau n'a lieu dans la boucle de rendu du dashboard.
+_task_summaries = {}
+
+
+def _pct(v):
+    """Pourcentage compact pour la colonne « Valeur » ('?' si indisponible)."""
+    return f"{v:.0f}%" if isinstance(v, (int, float)) else "?"
+
+
+def task_summary(name):
+    """Couple (texte, style rich) représentatif d'une tâche pour le tableau de bord.
+
+    Renvoyé au dashboard via le `summary_provider` ; ('—', 'dim') tant que la tâche
+    n'a pas encore produit de relevé.
+    """
+    return _task_summaries.get(name) or ("—", "dim")
+
+
 def collect_sample():
     """Construit un échantillon système (tag 'system') à partir de system_state."""
     cpu = system_state.get_cpu_usage_global(delay=0.2)
@@ -608,7 +636,13 @@ def collect_mirth_sample():
 
 def scheduled_check():
     """Tâche programmée 'system' : relève et enregistre l'état de la machine."""
-    database.insert_metric(collect_sample())
+    sample = collect_sample()
+    database.insert_metric(sample)
+    cpu, mem = sample.get("cpu_percent"), sample.get("mem_percent")
+    alert = ((isinstance(cpu, (int, float)) and cpu >= 85)
+             or (isinstance(mem, (int, float)) and mem >= 90))
+    _task_summaries["metrics-collector"] = (
+        f"CPU {_pct(cpu)} · Mém {_pct(mem)}", "yellow" if alert else "")
 
 
 def scheduled_mirth_check():
@@ -623,6 +657,13 @@ def scheduled_mirth_check():
 
     # Présence déduite du relevé : cpu nul => processus introuvable sur ce tick.
     found = sample["cpu_percent"] is not None
+    if found:
+        sock = sample.get("sockets")
+        sock_txt = f" · {sock} sock" if isinstance(sock, int) else ""
+        _task_summaries["mirth-collector"] = (
+            f"CPU {_pct(sample['cpu_percent'])} · Mém {_pct(sample['mem_percent'])}{sock_txt}", "")
+    else:
+        _task_summaries["mirth-collector"] = ("processus absent", "red")
     if _mirth_prev_found is not None and found != _mirth_prev_found:
         if found:
             emit_alarm("mirth_up")
@@ -649,6 +690,13 @@ def scheduled_mirth_overview():
     ov = mirth_api.get_overview(timeout=8)
     database.insert_mirth_snapshot(ov)
     detect_mirth_error_messages(ov)
+    if ov.get("reachable"):
+        nch = ov.get("channel_count") or 0
+        err = (ov.get("totals") or {}).get("error") or 0
+        _task_summaries["mirth-overview-collector"] = (
+            f"{nch} canaux · {err} err", "red" if err else "")
+    else:
+        _task_summaries["mirth-overview-collector"] = ("injoignable", "red")
 
 
 # Jeu des clés (channel_id, message_id, meta_data_id) des messages signalés en
@@ -922,9 +970,31 @@ def scheduled_device_check():
     # 3. Ligne d'état console : résumé compact accolé au collecteur (OK:n/KO:m).
     _device_last_summary = (f"(OK:{online}/KO:{offline})" if devices
                             else "(aucune cible)")
+    _task_summaries[DEVICE_TASK_NAME] = (
+        (f"OK {online} · KO {offline}", "red" if offline else "")
+        if devices else ("aucune cible", "dim"))
 
     # 4. Détection des transitions (alarmes), clé = (host, port).
     _detect_device_transitions(devices, ts)
+
+
+def scheduled_purge():
+    """Tâche programmée : applique la rétention en purgeant l'historique trop ancien.
+
+    Supprime les relevés de plus de `RETENTION_DAYS` jours dans toutes les tables
+    horodatées (cf. `database.purge_older_than`). No-op si la rétention est
+    désactivée (RETENTION_DAYS <= 0). Cadence horaire (la rétention étant en jours,
+    une purge fréquente est inutile mais peu coûteuse).
+    """
+    if RETENTION_DAYS <= 0:
+        _task_summaries[RETENTION_TASK_NAME] = ("illimitée", "dim")
+        return
+    deleted = database.purge_older_than(days=RETENTION_DAYS)
+    _task_summaries[RETENTION_TASK_NAME] = (
+        f"{RETENTION_DAYS} j · {deleted} purgés", "yellow" if deleted else "")
+    if deleted:
+        log.log(f"[checker_service] Rétention {RETENTION_DAYS} j : "
+                f"{deleted} ligne(s) ancienne(s) purgée(s).")
 
 
 def _detect_device_transitions(devices, ts):
@@ -1486,8 +1556,14 @@ def api_setevent(req):
 # API : SUPERVISION & MAINTENANCE DE LA BASE (base SQLite)
 # ==========================================================================
 def api_db_info(req):
-    """État détaillé de la base : taille, fragmentation, tables, bornes temporelles."""
-    return database.get_db_stats()
+    """État détaillé de la base : taille, fragmentation, tables, bornes temporelles.
+
+    Y joint la rétention automatique configurée (`retention_days`) afin que la page
+    affiche la politique en vigueur et propose la même valeur par défaut à la purge.
+    """
+    stats = database.get_db_stats()
+    stats["retention_days"] = RETENTION_DAYS
+    return stats
 
 
 def api_db_integrity(req):
@@ -1540,11 +1616,12 @@ def api_db_reset(req):
 
 
 def api_db_purge(req):
-    """Supprime les relevés plus vieux que ?days=N jours (défaut 30)."""
+    """Supprime les relevés plus vieux que ?days=N jours (défaut = rétention configurée)."""
+    default_days = RETENTION_DAYS if RETENTION_DAYS > 0 else 30
     try:
-        days = int(req.get("days", 30))
+        days = int(req.get("days", default_days))
     except ValueError:
-        days = 30
+        days = default_days
     if days < 0:
         return (400, {"ok": False, "error": "Le nombre de jours doit être positif."})
     deleted = database.purge_older_than(days=days)
@@ -1715,6 +1792,43 @@ def api_mirth_api(req):
         data["reachable"] = True
         data["reachable_at"] = data.get("snapshot_at")
     return data
+
+
+def api_mirth_kpi_baseline(req):
+    """Repère (baseline) des KPI cumulés Mirth — lecture (GET).
+
+    Renvoie la dernière photo enregistrée des totaux « reçus »/« erreurs » (fixée
+    via le bouton de la page statistiques), ou des champs nuls si aucun repère n'a
+    encore été posé. La page s'en sert pour afficher l'écart (actuel − repère).
+    """
+    return database.get_kpi_baseline() or {"received": None, "error": None,
+                                            "saved_at": None}
+
+
+def api_mirth_kpi_baseline_save(req):
+    """Repère (baseline) des KPI cumulés Mirth — enregistrement (POST).
+
+    Mémorise les totaux cumulés « reçus » et « erreurs » du dernier instantané
+    historisé (les mêmes valeurs que celles affichées par la page) afin de pouvoir
+    afficher ensuite l'écart depuis ce repère. Les valeurs sont relues CÔTÉ SERVEUR
+    (aucune confiance au corps de requête) ; repli sur un appel live si aucun
+    instantané n'existe encore. Renvoie 503 si Mirth n'a fourni aucune donnée.
+    """
+    ov = database.get_mirth_overview_latest()
+    if not ov.get("snapshot_at"):
+        # Pas encore d'instantané historisé : repli sur un appel live. `get_overview`
+        # renvoie des totaux à zéro même injoignable, d'où le contrôle `reachable`.
+        live = mirth_api.get_overview(timeout=_mirth_timeout(req))
+        if not live.get("reachable"):
+            return (503, {"ok": False, "error": "Aucune donnee Mirth disponible : "
+                          "impossible de fixer un repere."})
+        ov = live
+    totals = ov.get("totals") or {}
+    received = int(totals.get("received") or 0)
+    error = int(totals.get("error") or 0)
+    saved = database.set_kpi_baseline(received, error)
+    log.log(f"[mirth-kpi] Repere fixe : recus={received}, erreurs={error}")
+    return {"ok": True, "baseline": saved}
 
 
 def api_mirth_channels(req):
@@ -2391,6 +2505,8 @@ def build_router(tasks, started_at):
 
     # API supervision Mirth (API REST + processus)
     router.get("/api/mirth/api", api_mirth_api)
+    router.get("/api/mirth/kpi-baseline", api_mirth_kpi_baseline)
+    router.post("/api/mirth/kpi-baseline", api_mirth_kpi_baseline_save)
     router.get("/api/mirth/history", api_mirth_history)
     router.get("/api/mirth/history/latest", api_mirth_history_latest)
     router.get("/api/mirth/throughput", api_mirth_throughput)
@@ -2441,6 +2557,10 @@ def main():
     parser.add_argument("--stagger", type=float, default=5.0,
                         help="Décalage initial entre les tâches du planificateur "
                              "en secondes (def: 5) — évite un pic de charge au tick")
+    parser.add_argument("--retention-days", type=int, default=15,
+                        help="Rétention max de l'historique en jours : les relevés "
+                             "plus anciens sont purgés automatiquement (purge horaire). "
+                             "0 = illimité. (def: 15)")
     parser.add_argument("--logfile", default=DEFAULT_LOGFILE,
                         help="Fichier de log Mirth par défaut pour /api/mirth")
     parser.add_argument("--mirth-url", default=None,
@@ -2449,11 +2569,12 @@ def main():
                         help="Identifiant de connexion à l'API Mirth")
     parser.add_argument("--mirth-password", default=None,
                         help="Mot de passe de connexion à l'API Mirth")
-    parser.add_argument("--no-browser", action="store_true",
-                        help="Ne pas ouvrir le navigateur au démarrage")
     args = parser.parse_args()
 
     DEFAULT_LOGFILE = args.logfile
+
+    global RETENTION_DAYS
+    RETENTION_DAYS = args.retention_days
 
     # URL publique du service pour les liens profonds des e-mails d'alerte :
     # CHECKER_BASE_URL si fournie, sinon nom d'hôte de la machine + port d'écoute.
@@ -2474,30 +2595,51 @@ def main():
     if args.mirth_password:
         os.environ["MIRTH_PASSWORD"] = args.mirth_password
 
-    # 1. Initialisation de la base
-    database.init_db()
-    log.log(f"[checker_service] Base SQLite : {database.DEFAULT_DB_PATH}")
-
-    # 1bis. Marqueurs d'interruption (arrêt logiciel / boot système) avant reprise
-    mark_startup_events()
-
-    # 2. Tâches programmées (relevés toutes les `interval` secondes), démarrées de
-    #    façon échelonnée (+stagger s entre chaque) pour ne pas sonder le système
-    #    simultanément et lisser la charge à chaque tick du planificateur.
+    # 1. Tâches programmées (relevés toutes les `interval` secondes). Créées AVANT
+    #    le tableau de bord console pour qu'il affiche leur état dès la 1re frame ;
+    #    elles ne démarrent qu'à start_staggered (plus bas), de façon échelonnée
+    #    (+stagger s entre chaque) pour ne pas sonder le système simultanément.
     tasks = [
         RecurringTask(args.interval, scheduled_check, name="metrics-collector"),
         RecurringTask(args.interval, scheduled_mirth_check, name="mirth-collector"),
         RecurringTask(args.interval, scheduled_mirth_overview, name="mirth-overview-collector"),
         RecurringTask(args.interval, scheduled_device_check, name=DEVICE_TASK_NAME),
     ]
-    # Ligne d'état console auto-écrasée : durée de la dernière exécution de chaque
-    # tâche, rafraîchie à chaque fin d'exécution (hook on_complete partagé).
+    # Tâche de rétention (purge de l'historique trop ancien) — cadence horaire,
+    # indépendante de --interval. Ajoutée seulement si la rétention est active ;
+    # sa première exécution (run_immediately) applique la rétention au démarrage.
+    if RETENTION_DAYS > 0:
+        tasks.append(RecurringTask(RETENTION_PURGE_INTERVAL, scheduled_purge,
+                                   name=RETENTION_TASK_NAME))
+
+    # 2. Tableau de bord console (rich) : tâches du planificateur en haut, journal
+    #    défilant en bas. Démarré tôt pour capturer les logs d'initialisation. Si
+    #    rich est absent ou hors terminal, retombe sur l'affichage texte (ligne
+    #    d'état réécrite en place + logs persistants).
+    log.start_dashboard(tasks, summary_provider=task_summary)
+    log.log("[checker_service] Démarrage du service.")
+
+    # 3. Initialisation de la base
+    database.init_db()
+    log.log(f"[checker_service] Base SQLite : {database.DEFAULT_DB_PATH}")
+
+    # 3bis. Marqueurs d'interruption (arrêt logiciel / boot système) avant reprise
+    mark_startup_events()
+
+    # 4. Démarrage échelonné des tâches. Le hook on_complete (ligne d'état console)
+    #    ne sert qu'au repli texte : sous le tableau de bord rich, la table des
+    #    tâches s'auto-rafraîchit et log.status() est neutralisé.
     status_line = make_scheduler_status_line(tasks)
     for t in tasks:
         t.on_complete = status_line
     start_staggered(tasks, step=args.stagger)
     log.log(f"[checker_service] {len(tasks)} tâches programmées démarrées "
-          f"(toutes les {args.interval}s, décalage {args.stagger}s entre chacune).")
+          f"(relevés toutes les {args.interval}s, décalage {args.stagger}s entre chacune).")
+    if RETENTION_DAYS > 0:
+        log.log(f"[checker_service] Rétention de l'historique : {RETENTION_DAYS} jours "
+                f"(purge automatique horaire).")
+    else:
+        log.log("[checker_service] Rétention de l'historique : illimitée (aucune purge auto).")
 
     # 3. Serveur web
     started_at = system_state.get_now_datetime()
@@ -2510,6 +2652,7 @@ def main():
         # même base en double (relevés trop fréquents/incohérents).
         for task in tasks:
             task.stop()
+        log.stop_dashboard()   # restaure l'écran pour que l'erreur reste visible
         log.log(f"[checker_service] Impossible d'écouter sur {args.host}:{args.port} "
               f"— le port est déjà utilisé (une autre instance tourne ?). [{e}]")
         sys.exit(1)
@@ -2519,22 +2662,20 @@ def main():
     log.log(f"[checker_service] Serveur web : {url}")
     log.log(f"[checker_service] Page statistiques : {url}statistiques.html")
     log.log("[checker_service] Ctrl+C pour arrêter.")
-
-    if not args.no_browser:
-        try:
-            import webbrowser
-            webbrowser.open(url)
-        except Exception:
-            pass
+    # Pas d'ouverture automatique du navigateur : l'URL ci-dessus est affichée
+    # dans le journal, à ouvrir manuellement.
 
     try:
         httpd.serve_forever()
     except KeyboardInterrupt:
-        log.log("\n[checker_service] Arrêt en cours...")
+        log.log("[checker_service] Arrêt en cours...")
     finally:
+        # Restaure l'écran normal du terminal AVANT les messages finaux, pour
+        # qu'ils s'affichent (sinon ils disparaîtraient avec l'écran du dashboard).
+        log.stop_dashboard()
+        log.clear()   # repli texte : retire la ligne d'état flottante éventuelle
         for task in tasks:
             task.stop()
-        log.clear()   # plus de tâches : retire la ligne d'état flottante
         httpd.shutdown()
         httpd.server_close()
         mirth_api.close_session()   # logout de la session Mirth durable partagée
