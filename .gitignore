@@ -10,3 +10,7 @@
 /checker_history.db-wal
 /checker_history.db-shm
 /checker_history.db.bak
+/superviseur.db
+/superviseur.db-wal
+/superviseur.db-shm
+/superviseur.db.bak

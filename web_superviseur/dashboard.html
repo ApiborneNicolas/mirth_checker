@@ -1,0 +1,563 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Superviseur — Tableau de bord</title>
+    <!-- Chart.js + adaptateur de dates (CDN) -->
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/luxon@3.4.4/build/global/luxon.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chartjs-adapter-luxon@1.3.1/dist/chartjs-adapter-luxon.umd.min.js"></script>
+    <!-- Thème (anti-flash : pose data-theme avant le rendu) -->
+    <script>
+        (function(){try{var t=localStorage.getItem("mc-theme");if(!t)t=matchMedia("(prefers-color-scheme: light)").matches?"light":"dark";document.documentElement.setAttribute("data-theme",t);}catch(e){document.documentElement.setAttribute("data-theme","dark");}})();
+    </script>
+    <link rel="stylesheet" href="theme.css">
+    <script src="theme.js" defer></script>
+    <style>
+        /* --- Styles spécifiques au tableau de bord superviseur --- */
+        table.sites { table-layout: auto; }
+        table.sites th, table.sites td { vertical-align: middle; }
+        tr.site-row { cursor: pointer; }
+        tr.site-row:hover td { background: color-mix(in srgb, var(--panel-2) 50%, transparent); }
+        tr.site-row.open td { background: color-mix(in srgb, var(--accent) 10%, transparent); }
+
+        .caret { display: inline-block; width: 14px; transition: transform .18s ease; color: var(--muted); }
+        tr.site-row.open .caret { transform: rotate(90deg); color: var(--accent); }
+
+        .st-dot { display: inline-block; width: 11px; height: 11px; border-radius: 50%; vertical-align: middle; box-shadow: 0 0 0 3px color-mix(in srgb, currentColor 22%, transparent); }
+        .st-dot.ok   { color: var(--ok);   background: var(--ok); }
+        .st-dot.warn { color: var(--warn); background: var(--warn); }
+        .st-dot.err  { color: var(--err);  background: var(--err); }
+        .st-dot.muted{ color: var(--muted);background: var(--muted); }
+
+        .site-name { font-weight: 650; font-size: 14px; display: flex; align-items: center; }
+        .site-host { font-size: 12px; color: var(--muted); font-family: var(--mono); margin-top: 3px; }
+        .site-host code { color: var(--accent-strong); }
+
+        .mirth-cell { line-height: 1.7; }
+        .mirth-meta { font-size: 12px; color: var(--muted); }
+        .chip { display: inline-block; padding: 1px 8px; border-radius: 999px; font-size: 11px; font-weight: 650; margin: 1px 0 1px 6px; }
+        .chip.err { background: color-mix(in srgb, var(--err) 18%, transparent); color: var(--err); }
+        .chip.ok  { background: color-mix(in srgb, var(--ok) 16%, transparent);  color: var(--ok); }
+        .chip.warn{ background: color-mix(in srgb, var(--warn) 18%, transparent);color: var(--warn); }
+
+        .age { font-size: 12.5px; color: var(--muted); white-space: nowrap; }
+
+        /* Mini-jauge CPU / mémoire dans la cellule système */
+        .gauge { display: flex; align-items: center; gap: 8px; }
+        .gauge + .gauge { margin-top: 5px; }
+        .gauge .lbl { font-size: 11px; color: var(--muted); width: 30px; }
+        .gauge .bar { width: 60px; height: 6px; border-radius: 4px; background: var(--panel-2); overflow: hidden; border: 1px solid var(--border-soft); }
+        .gauge .bar > i { display: block; height: 100%; border-radius: 4px; }
+        .gauge .pct { font-variant-numeric: tabular-nums; font-size: 12.5px; min-width: 38px; }
+
+        /* Ligne de détail dépliée */
+        tr.detail-row > td { padding: 0; border-bottom: 1px solid var(--border-soft); background: var(--bg-soft); }
+        .detail { padding: 18px 20px; animation: detailfade .22s ease; }
+        @keyframes detailfade { from { opacity: 0; transform: translateY(-4px); } to { opacity: 1; transform: none; } }
+        .detail-head { display: flex; flex-wrap: wrap; align-items: center; gap: 10px 16px; margin-bottom: 14px; }
+        .detail-head .info-chips { display: flex; flex-wrap: wrap; gap: 6px 14px; font-size: 12.5px; color: var(--muted); }
+        .detail-head .info-chips b { color: var(--text); font-weight: 600; }
+        .detail-head .spacer { flex: 1 1 auto; }
+
+        .charts { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin-bottom: 16px; }
+        @media (max-width: 980px) { .charts { grid-template-columns: 1fr; } }
+        .chart-card { background: var(--panel); border: 1px solid var(--border); border-radius: var(--radius); padding: 14px 16px; }
+        .chart-card h3 { font-size: 12px; margin: 0 0 10px; font-weight: 650; text-transform: uppercase; letter-spacing: .04em; color: var(--muted); }
+        .chart-wrap { position: relative; height: 220px; }
+        .chart-empty { display: flex; align-items: center; justify-content: center; height: 220px; color: var(--muted); font-size: 13px; text-align: center; padding: 0 12px; }
+
+        .ch-table-wrap { max-height: 280px; overflow: auto; border: 1px solid var(--border); border-radius: var(--radius); }
+        .ch-table-wrap h3 { font-size: 12px; margin: 0; padding: 12px 14px; font-weight: 650; text-transform: uppercase; letter-spacing: .04em; color: var(--muted); position: sticky; top: 0; background: var(--panel); border-bottom: 1px solid var(--border-soft); z-index: 1; }
+        .ch-state { font-size: 11px; }
+
+        .empty-state { text-align: center; color: var(--muted); padding: 40px 20px; }
+        .empty-state a { font-weight: 600; }
+    </style>
+</head>
+<body>
+    <header class="topbar">
+        <div class="brand">
+            <span class="logo">🛰️</span>
+            <h1>Superviseur</h1>
+        </div>
+        <nav>
+            <a href="dashboard.html" aria-current="page">📡 Tableau de bord</a>
+            <a href="admin.html">⚙️ Administration</a>
+        </nav>
+        <div class="actions">
+            <span class="age" id="last-update">—</span>
+            <button id="refresh" class="primary">↻ Rafraîchir</button>
+            <button class="theme-toggle" type="button" title="Basculer clair / sombre" aria-label="Basculer le thème">
+                <span class="icon-moon">🌙</span><span class="icon-sun">☀️</span>
+            </button>
+        </div>
+    </header>
+
+    <!-- ============== CARTES DE SYNTHÈSE ============== -->
+    <div class="cards">
+        <div class="card"><div class="label">Sites supervisés</div><div class="value" id="c-total">—</div><div class="sub" id="c-total-sub">—</div></div>
+        <div class="card"><div class="label">En ligne</div><div class="value" id="c-online" style="color:var(--ok)">—</div><div class="sub">services joignables</div></div>
+        <div class="card"><div class="label">Hors ligne</div><div class="value" id="c-offline" style="color:var(--err)">—</div><div class="sub">injoignables / désactivés</div></div>
+        <div class="card"><div class="label">Mirth en alerte</div><div class="value" id="c-mirth-err" style="color:var(--warn)">—</div><div class="sub">erreurs ou injoignable</div></div>
+    </div>
+
+    <!-- ============== TABLEAU DES SITES ============== -->
+    <div class="panel">
+        <h2>État des sites <span class="hint" style="margin:0 0 0 8px;text-transform:none;letter-spacing:0;font-weight:500">— cliquez une ligne pour déplier les graphiques</span></h2>
+        <table class="sites">
+            <thead>
+                <tr>
+                    <th style="width:34px"></th>
+                    <th>Site</th>
+                    <th>État</th>
+                    <th>Mirth</th>
+                    <th>Système (hôte)</th>
+                    <th>Dernier relevé</th>
+                    <th style="text-align:right">Accès</th>
+                </tr>
+            </thead>
+            <tbody id="sites-body">
+                <tr><td colspan="7" class="empty-state">Chargement…</td></tr>
+            </tbody>
+        </table>
+    </div>
+
+    <footer>
+        <span id="foot-status"><span class="dot pulse" style="background:var(--ok)"></span>Connecté</span>
+        — Supervision agrégée des instances <code>checker_service</code>
+    </footer>
+
+<script>
+const API = "";
+const $ = id => document.getElementById(id);
+const REFRESH_MS = 30000;          // rafraîchissement du tableau (les relevés sont à la minute côté service)
+const NCOLS = 7;
+let summary = [];                  // dernier /api/sites/summary
+let lastSig = "";                  // signature de l'ensemble des sites (détecte un changement de structure)
+let openId = null;                 // id du site déplié (un seul à la fois)
+let charts = { sys: null, thr: null };
+let detailHours = 6;               // fenêtre des graphiques de détail
+
+// Couleurs de séries (alignées sur les tokens du thème)
+const COL = { cpu: "#38bdf8", mem: "#a78bfa", recv: "#2dd4bf", err: "#ef4444" };
+
+// ----------------------------------------------------------------------
+// Utilitaires
+// ----------------------------------------------------------------------
+function esc(s) {
+    return String(s ?? "").replace(/[&<>"']/g, c =>
+        ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+}
+function pct(v) { return (v === null || v === undefined) ? "—" : (Math.round(v * 10) / 10) + " %"; }
+function num(v) { return (v === null || v === undefined) ? "—" : Number(v).toLocaleString("fr-FR"); }
+
+function parseTs(s) {
+    if (!s) return null;
+    const d = new Date(s.replace(" ", "T"));     // "YYYY-MM-DD HH:MM:SS" (heure locale du site)
+    return isNaN(d.getTime()) ? null : d;
+}
+function ageStr(s) {
+    const d = parseTs(s);
+    if (!d) return "jamais";
+    let sec = Math.round((Date.now() - d.getTime()) / 1000);
+    if (sec < 0) sec = 0;
+    if (sec < 60) return "il y a " + sec + " s";
+    if (sec < 3600) return "il y a " + Math.round(sec / 60) + " min";
+    if (sec < 86400) return "il y a " + Math.round(sec / 3600) + " h";
+    return "il y a " + Math.round(sec / 86400) + " j";
+}
+function setFoot(ok, msg) {
+    $("foot-status").innerHTML = ok
+        ? '<span class="dot pulse" style="background:var(--ok)"></span>Connecté'
+        : '<span class="dot" style="background:var(--err)"></span>Hors ligne : ' + esc(msg);
+}
+
+// État global d'un site (priorité Mirth) -> {level, label}
+function statusInfo(s) {
+    if (!s.enabled) return { level: "muted", label: "Désactivé" };
+    const st = s.status;
+    if (!st || !st.polled_at) return { level: "muted", label: "En attente" };
+    if (!st.ok) return { level: "err", label: "Hors ligne" };
+    if (st.mirth_reachable === false) return { level: "warn", label: "Mirth injoignable" };
+    if ((st.error_count || 0) > 0 || (st.channels_in_error || 0) > 0)
+        return { level: "warn", label: "Erreurs Mirth" };
+    if (st.channel_count != null && st.channels_started != null
+        && st.channels_started < st.channel_count)
+        return { level: "warn", label: "Canaux arrêtés" };
+    return { level: "ok", label: "Opérationnel" };
+}
+function badgeClass(level) {
+    return level === "ok" ? "b-ok" : level === "warn" ? "b-warn" : level === "err" ? "b-err" : "b-muted";
+}
+
+// ----------------------------------------------------------------------
+// Constructeurs de cellules (réutilisés au build complet ET à la mise à jour)
+// ----------------------------------------------------------------------
+function cellSite(s, info) {
+    const st = s.status || {};
+    return `<div class="site-name"><span class="st-dot ${info.level}" style="margin-right:8px"></span>${esc(s.name)}</div>`
+        + `<div class="site-host"><code>${esc(s.host)}:${s.port}</code>`
+        + (st.hostname ? ` · ${esc(st.hostname)}` : "") + `</div>`;
+}
+function cellState(info) {
+    return `<span class="badge ${badgeClass(info.level)}">${esc(info.label)}</span>`;
+}
+function cellMirth(s) {
+    const st = s.status || {};
+    if (!s.enabled || !st.polled_at) return '<span class="mirth-meta">—</span>';
+    if (!st.ok)
+        return `<span class="badge b-err">Service hors ligne</span>`
+            + (st.error ? `<div class="mirth-meta">${esc(st.error)}</div>` : "");
+    if (st.mirth_reachable === false) return `<span class="badge b-err">Injoignable</span>`;
+    const started = st.channels_started, total = st.channel_count;
+    const errN = st.error_count || 0, errCh = st.channels_in_error || 0;
+    const chanOk = (started != null && total != null && started >= total);
+    return `<span class="badge b-ok">Joignable</span>`
+        + (st.mirth_version ? ` <span class="mirth-meta">v${esc(st.mirth_version)}</span>` : "")
+        + `<div class="mirth-meta">`
+        + (total != null
+            ? `<span class="chip ${chanOk ? "ok" : "warn"}">${started ?? "?"}/${total} canaux démarrés</span>`
+            : "canaux : ?")
+        + (errN > 0 ? `<span class="chip err">${num(errN)} erreurs</span>` : "")
+        + (errCh > 0 ? `<span class="chip err">${errCh} canal(aux) en erreur</span>` : "")
+        + (errN === 0 && errCh === 0 && total != null ? `<span class="chip ok">sans erreur</span>` : "")
+        + `</div>`;
+}
+function gauge(label, value, color) {
+    if (value === null || value === undefined)
+        return `<div class="gauge"><span class="lbl">${label}</span><span class="age">—</span></div>`;
+    const v = Math.max(0, Math.min(100, value));
+    const c = v >= 90 ? "var(--err)" : v >= 75 ? "var(--warn)" : color;
+    return `<div class="gauge"><span class="lbl">${label}</span>`
+        + `<span class="bar"><i style="width:${v}%;background:${c}"></i></span>`
+        + `<span class="pct">${Math.round(v)} %</span></div>`;
+}
+function cellSys(s) {
+    const st = s.status || {};
+    if (!s.enabled || !st.ok) return '<span class="age">—</span>';
+    return gauge("CPU", st.cpu_percent, COL.cpu) + gauge("Mém", st.mem_percent, COL.mem);
+}
+function cellAge(s) {
+    const st = s.status || {};
+    return `<span class="age-val">${st.polled_at ? esc(ageStr(st.polled_at)) : "jamais"}</span>`
+        + (st.latency_ms != null && st.ok ? `<br><span style="opacity:.7">${Math.round(st.latency_ms)} ms</span>` : "");
+}
+function cellAccess(s) {
+    const url = `http://${s.host}:${s.port}/`;
+    return `<button class="small" onclick="event.stopPropagation();window.open('${url}','_blank')">↗ Ouvrir</button>`;
+}
+
+// ----------------------------------------------------------------------
+// Chargement de la synthèse + aiguillage build complet / mise à jour
+// ----------------------------------------------------------------------
+async function loadSummary() {
+    try {
+        const r = await fetch(API + "/api/sites/summary");
+        if (!r.ok) throw new Error("HTTP " + r.status);
+        const d = await r.json();
+        summary = d.sites || [];
+        renderCards();
+        // Reconstruit la table seulement si l'ensemble des sites a changé (sinon
+        // mise à jour en place : préserve la ligne dépliée et ses graphiques).
+        const sig = summary.map(s => s.id).join(",");
+        if (sig !== lastSig) { lastSig = sig; renderTable(); }
+        else updateRows();
+        $("last-update").textContent = "MàJ " + new Date().toLocaleTimeString("fr-FR");
+        setFoot(true);
+    } catch (e) {
+        setFoot(false, e.message);
+        if (!summary.length)
+            $("sites-body").innerHTML =
+                `<tr><td colspan="${NCOLS}" class="empty-state">Superviseur injoignable : ${esc(e.message)}</td></tr>`;
+    }
+}
+
+function renderCards() {
+    const total = summary.length;
+    const enabled = summary.filter(s => s.enabled);
+    const online = enabled.filter(s => s.status && s.status.ok).length;
+    const offline = total - online;
+    const mirthErr = enabled.filter(s => {
+        const st = s.status;
+        return st && st.ok && (st.mirth_reachable === false
+            || (st.error_count || 0) > 0 || (st.channels_in_error || 0) > 0);
+    }).length;
+    $("c-total").textContent = total;
+    $("c-total-sub").textContent = enabled.length + " actif" + (enabled.length > 1 ? "s" : "")
+        + " · " + (total - enabled.length) + " désactivé(s)";
+    $("c-online").textContent = online;
+    $("c-offline").textContent = offline;
+    $("c-mirth-err").textContent = mirthErr;
+}
+
+function renderTable() {
+    const tb = $("sites-body");
+    if (!summary.length) {
+        tb.innerHTML = `<tr><td colspan="${NCOLS}" class="empty-state">`
+            + `Aucun site configuré.<br><a href="admin.html">Ajouter un site →</a></td></tr>`;
+        return;
+    }
+    tb.innerHTML = "";
+    summary.forEach(s => {
+        const info = statusInfo(s);
+        const tr = document.createElement("tr");
+        tr.className = "site-row" + (s.id === openId ? " open" : "");
+        tr.dataset.id = s.id;
+        tr.innerHTML =
+            `<td><span class="caret">▶</span></td>` +
+            `<td class="c-site">${cellSite(s, info)}</td>` +
+            `<td class="c-state">${cellState(info)}</td>` +
+            `<td class="mirth-cell c-mirth">${cellMirth(s)}</td>` +
+            `<td class="c-sys">${cellSys(s)}</td>` +
+            `<td class="age c-age">${cellAge(s)}</td>` +
+            `<td style="text-align:right">${cellAccess(s)}</td>`;
+        tr.addEventListener("click", () => toggleRow(s.id));
+        tb.appendChild(tr);
+        if (s.id === openId) {
+            tb.appendChild(buildDetailRow(s));   // ré-ouvre + (re)charge les graphiques
+            loadDetail(s);
+        }
+    });
+}
+
+// Mise à jour en place des cellules dynamiques (sans toucher aux graphiques ouverts).
+function updateRows() {
+    summary.forEach(s => {
+        const tr = document.querySelector(`tr.site-row[data-id="${s.id}"]`);
+        if (!tr) { renderTable(); return; }     // structure inattendue : reconstruit
+        const info = statusInfo(s);
+        tr.querySelector(".c-site").innerHTML = cellSite(s, info);
+        tr.querySelector(".c-state").innerHTML = cellState(info);
+        tr.querySelector(".c-mirth").innerHTML = cellMirth(s);
+        tr.querySelector(".c-sys").innerHTML = cellSys(s);
+        tr.querySelector(".c-age").innerHTML = cellAge(s);
+        // Détail ouvert : rafraîchit la table des canaux (depuis l'instantané),
+        // mais PAS les graphiques (pour ne pas casser la lecture en cours).
+        if (s.id === openId) renderChannels(s);
+    });
+}
+
+function updateAges() {
+    summary.forEach(s => {
+        const tr = document.querySelector(`tr.site-row[data-id="${s.id}"]`);
+        if (!tr) return;
+        const val = tr.querySelector(".c-age .age-val");
+        if (val && s.status && s.status.polled_at) val.textContent = ageStr(s.status.polled_at);
+    });
+}
+
+// ----------------------------------------------------------------------
+// Dépliage d'une ligne (un seul à la fois, sans préchargement)
+// ----------------------------------------------------------------------
+function toggleRow(id) {
+    if (openId === id) openId = null; else openId = id;
+    destroyCharts();
+    renderTable();
+}
+function destroyCharts() {
+    if (charts.sys) { charts.sys.destroy(); charts.sys = null; }
+    if (charts.thr) { charts.thr.destroy(); charts.thr = null; }
+}
+
+function buildDetailRow(s) {
+    const st = s.status || {};
+    const tr = document.createElement("tr");
+    tr.className = "detail-row";
+    const url = `http://${s.host}:${s.port}/`;
+    const chips = [];
+    if (st.hostname) chips.push(`Hôte : <b>${esc(st.hostname)}</b>`);
+    if (st.os) chips.push(`OS : <b>${esc(st.os)}</b>`);
+    if (st.mirth_version) chips.push(`Mirth : <b>v${esc(st.mirth_version)}</b>`);
+    if (st.proc_cpu_percent != null) chips.push(`Processus Mirth : <b>CPU ${pct(st.proc_cpu_percent)} · Mém ${pct(st.proc_mem_percent)}</b>`);
+    if (st.polled_at) chips.push(`Relevé : <b>${esc(ageStr(st.polled_at))}</b>`);
+
+    tr.innerHTML = `<td colspan="${NCOLS}"><div class="detail">
+        <div class="detail-head">
+            <div class="info-chips">${chips.join('<span style="opacity:.4">|</span>') || '<span class="age">Aucune donnée pour l\'instant.</span>'}</div>
+            <span class="spacer"></span>
+            <label style="display:flex;align-items:center;gap:7px;margin:0">Fenêtre
+                <select class="d-hours" style="width:auto">
+                    <option value="1">1 h</option>
+                    <option value="6">6 h</option>
+                    <option value="24">24 h</option>
+                </select>
+            </label>
+            <button class="small d-refresh">↻ Graphiques</button>
+            <button class="small primary" onclick="window.open('${url}','_blank')">↗ Ouvrir le site</button>
+        </div>
+        <div class="charts">
+            <div class="chart-card"><h3>🖥 Système — CPU / Mémoire (hôte)</h3>
+                <div class="chart-wrap" id="wrap-sys"><canvas id="chart-sys"></canvas></div></div>
+            <div class="chart-card"><h3>📈 Activité Mirth — messages / min</h3>
+                <div class="chart-wrap" id="wrap-thr"><canvas id="chart-thr"></canvas></div></div>
+        </div>
+        <div class="ch-table-wrap">
+            <h3>Canaux Mirth — dernier relevé</h3>
+            <table><thead><tr>
+                <th>Canal</th><th>État</th><th class="num">Reçus</th>
+                <th class="num">Envoyés</th><th class="num">File</th><th class="num">Erreurs</th>
+            </tr></thead><tbody id="ch-body"></tbody></table>
+        </div>
+    </div></td>`;
+
+    const sel = tr.querySelector(".d-hours");
+    sel.value = String(detailHours);
+    sel.addEventListener("change", () => { detailHours = parseInt(sel.value, 10) || 6; loadDetail(s); });
+    tr.querySelector(".d-refresh").addEventListener("click", () => loadDetail(s));
+    return tr;
+}
+
+function renderChannels(s) {
+    const body = $("ch-body");
+    if (!body) return;
+    const channels = (s.status && s.status.channels) || [];
+    if (!channels.length) {
+        body.innerHTML = `<tr><td colspan="6" style="color:var(--muted);text-align:center;padding:18px">Aucun canal connu.</td></tr>`;
+        return;
+    }
+    body.innerHTML = "";
+    channels.slice().sort((a, b) => (b.error || 0) - (a.error || 0) || String(a.name).localeCompare(String(b.name)))
+        .forEach(c => {
+            const err = c.error || 0;
+            const started = (c.state || "").toUpperCase() === "STARTED";
+            const tr = document.createElement("tr");
+            tr.innerHTML =
+                `<td>${esc(c.name)}</td>` +
+                `<td><span class="badge ${started ? "b-ok" : "b-warn"} ch-state">${esc(c.state || "?")}</span></td>` +
+                `<td class="num">${num(c.received)}</td>` +
+                `<td class="num">${num(c.sent)}</td>` +
+                `<td class="num">${num(c.queued)}</td>` +
+                `<td class="num" ${err > 0 ? 'style="color:var(--err);font-weight:700"' : ""}>${num(err)}</td>`;
+            body.appendChild(tr);
+        });
+}
+
+// ----------------------------------------------------------------------
+// Graphiques à la demande (proxy vers les API du site distant)
+// ----------------------------------------------------------------------
+function proxyUrl(siteId, path) {
+    return `${API}/api/sites/${siteId}/proxy?path=` + encodeURIComponent(path);
+}
+async function proxyJson(siteId, path) {
+    const r = await fetch(proxyUrl(siteId, path));
+    const d = await r.json().catch(() => ({}));
+    if (!r.ok) throw new Error(d.error || ("HTTP " + r.status));
+    return d;
+}
+function chartColors() {
+    return (window.MCTheme && MCTheme.chartColors())
+        || { tick: "#93a3bb", grid: "rgba(148,163,184,.10)", text: "#e6edf7" };
+}
+function baseOptions() {
+    const c = chartColors();
+    return {
+        responsive: true, maintainAspectRatio: false, animation: false,
+        interaction: { mode: "index", intersect: false },
+        scales: {
+            x: { type: "time", time: { tooltipFormat: "dd/MM HH:mm" },
+                 ticks: { color: c.tick, maxRotation: 0, autoSkip: true, maxTicksLimit: 6 },
+                 grid: { color: c.grid } },
+            y: { beginAtZero: true, ticks: { color: c.tick }, grid: { color: c.grid } },
+        },
+        plugins: { legend: { labels: { color: c.text, boxWidth: 12, font: { size: 11 } } } },
+    };
+}
+function showChartEmpty(wrapId, msg) {
+    const wrap = $(wrapId);
+    if (wrap) wrap.innerHTML = `<div class="chart-empty">${esc(msg)}</div>`;
+}
+
+async function loadDetail(s) {
+    renderChannels(s);
+    destroyCharts();
+    const h = detailHours;
+    loadSysChart(s, h);
+    loadThrChart(s, h);
+}
+
+async function loadSysChart(s, hours) {
+    try {
+        const d = await proxyJson(s.id, `/api/history?tag=system&hours=${hours}`);
+        const rows = d.samples || [];
+        if (!rows.length) { showChartEmpty("wrap-sys", "Aucun relevé système sur la période."); return; }
+        const cpu = rows.filter(r => r.cpu_percent != null).map(r => ({ x: r.timestamp.replace(" ", "T"), y: r.cpu_percent }));
+        const mem = rows.filter(r => r.mem_percent != null).map(r => ({ x: r.timestamp.replace(" ", "T"), y: r.mem_percent }));
+        const opts = baseOptions();
+        opts.scales.y.max = 100;
+        opts.scales.y.ticks.callback = v => v + " %";
+        charts.sys = new Chart($("chart-sys"), {
+            type: "line",
+            data: { datasets: [
+                { label: "CPU %", data: cpu, borderColor: COL.cpu, backgroundColor: COL.cpu + "22", borderWidth: 2, pointRadius: 0, tension: .25, fill: true },
+                { label: "Mémoire %", data: mem, borderColor: COL.mem, backgroundColor: "transparent", borderWidth: 2, pointRadius: 0, tension: .25 },
+            ] },
+            options: opts,
+        });
+    } catch (e) {
+        showChartEmpty("wrap-sys", "Indisponible : " + e.message);
+    }
+}
+
+// Débit (msg/min) calculé par delta des compteurs cumulés, reset borné à 0.
+function ratesFrom(rows, field) {
+    const pts = [];
+    for (let i = 1; i < rows.length; i++) {
+        const t0 = parseTs(rows[i - 1].timestamp), t1 = parseTs(rows[i].timestamp);
+        if (!t0 || !t1) continue;
+        const dtMin = (t1 - t0) / 60000;
+        if (dtMin <= 0) continue;
+        let delta = (rows[i][field] || 0) - (rows[i - 1][field] || 0);
+        if (delta < 0) delta = 0;                  // compteur réinitialisé (redémarrage du serveur)
+        pts.push({ x: rows[i].timestamp.replace(" ", "T"), y: delta / dtMin });
+    }
+    return pts;
+}
+
+async function loadThrChart(s, hours) {
+    try {
+        const d = await proxyJson(s.id, `/api/mirth/throughput?hours=${hours}`);
+        const rows = d.samples || [];
+        if (rows.length < 2) { showChartEmpty("wrap-thr", "Pas assez de points sur la période."); return; }
+        const recv = ratesFrom(rows, "received");
+        const err = ratesFrom(rows, "error");
+        const opts = baseOptions();
+        opts.scales.y.ticks.callback = v => Math.round(v);
+        charts.thr = new Chart($("chart-thr"), {
+            type: "line",
+            data: { datasets: [
+                { label: "Reçus / min", data: recv, borderColor: COL.recv, backgroundColor: COL.recv + "22", borderWidth: 2, pointRadius: 0, tension: .25, fill: true },
+                { label: "Erreurs / min", data: err, borderColor: COL.err, backgroundColor: "transparent", borderWidth: 2, pointRadius: 0, tension: .25 },
+            ] },
+            options: opts,
+        });
+    } catch (e) {
+        showChartEmpty("wrap-thr", "Indisponible : " + e.message);
+    }
+}
+
+// Recolore les graphiques actifs au changement de thème
+document.addEventListener("mc-theme-change", () => {
+    const c = chartColors();
+    [charts.sys, charts.thr].forEach(ch => {
+        if (!ch) return;
+        ch.options.scales.x.ticks.color = c.tick;
+        ch.options.scales.y.ticks.color = c.tick;
+        ch.options.scales.x.grid.color = c.grid;
+        ch.options.scales.y.grid.color = c.grid;
+        ch.options.plugins.legend.labels.color = c.text;
+        ch.update();
+    });
+});
+
+// ----------------------------------------------------------------------
+// Branchements + boucles de rafraîchissement
+// ----------------------------------------------------------------------
+$("refresh").addEventListener("click", loadSummary);
+loadSummary();
+setInterval(loadSummary, REFRESH_MS);
+setInterval(updateAges, 15000);    // rafraîchit l'affichage « il y a X » sans nouvelle donnée
+</script>
+</body>
+</html>

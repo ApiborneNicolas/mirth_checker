@@ -67,6 +67,12 @@ REM PyInstaller les rate : le thread de rendu de rich.live plante (ModuleNotFoun
 REM et le tableau de bord reste un ecran noir. --add-data "web;web" embarque les
 REM pages statiques (servies depuis sys._MEIPASS en mode gele).
 "%PYTHON_EXE%" -m PyInstaller --onefile --collect-submodules rich --add-data ".smtp_config.py;." --add-data ".mirth_config.py;." --add-data "web;web" checker_service.py
+REM superviseur : meta-superviseur des instances checker_service. Embarque ses
+REM propres pages (web_superviseur) ; pas de config SMTP/Mirth (il interroge les
+REM sites via HTTP). --collect-submodules rich pour le tableau de bord console
+REM (meme contrainte que checker_service). La base superviseur.db est creee a
+REM cote de l'exe au lancement.
+"%PYTHON_EXE%" -m PyInstaller --onefile --collect-submodules rich --add-data "web_superviseur;web_superviseur" superviseur.py
 echo.
 echo [OK] Compilation terminee !
 

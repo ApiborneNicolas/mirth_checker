@@ -1,0 +1,295 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Superviseur — Administration des sites</title>
+    <!-- Thème (anti-flash : pose data-theme avant le rendu) -->
+    <script>
+        (function(){try{var t=localStorage.getItem("mc-theme");if(!t)t=matchMedia("(prefers-color-scheme: light)").matches?"light":"dark";document.documentElement.setAttribute("data-theme",t);}catch(e){document.documentElement.setAttribute("data-theme","dark");}})();
+    </script>
+    <link rel="stylesheet" href="theme.css">
+    <script src="theme.js" defer></script>
+    <style>
+        /* --- Styles spécifiques à la page Administration --- */
+        .grid { display: grid; grid-template-columns: 360px 1fr; gap: 18px; align-items: start; }
+        @media (max-width: 880px) { .grid { grid-template-columns: 1fr; } }
+        td.actions-cell { white-space: nowrap; text-align: right; }
+        td.actions-cell button { margin-left: 6px; }
+        .host-cell code { font-size: 12.5px; color: var(--accent-strong); }
+        .form-foot { display: flex; gap: 8px; margin-top: 4px; }
+        .edit-banner {
+            display: none; font-size: 12.5px; color: var(--accent);
+            background: color-mix(in srgb, var(--accent) 12%, transparent);
+            border: 1px solid color-mix(in srgb, var(--accent) 30%, transparent);
+            border-radius: var(--radius-sm); padding: 7px 11px; margin-bottom: 12px;
+        }
+        .edit-banner.show { display: block; }
+        tr.row-disabled td:not(.actions-cell) { opacity: .5; }
+        .empty-row td { color: var(--muted); text-align: center; padding: 22px; }
+    </style>
+</head>
+<body>
+    <header class="topbar">
+        <div class="brand">
+            <span class="logo">🛰️</span>
+            <h1>Administration des sites</h1>
+        </div>
+        <nav>
+            <a href="dashboard.html">📡 Tableau de bord</a>
+            <a href="admin.html" aria-current="page">⚙️ Administration</a>
+        </nav>
+        <div class="actions">
+            <button id="refresh" class="primary">↻ Rafraîchir</button>
+            <button class="theme-toggle" type="button" title="Basculer clair / sombre" aria-label="Basculer le thème">
+                <span class="icon-moon">🌙</span><span class="icon-sun">☀️</span>
+            </button>
+        </div>
+    </header>
+
+    <div class="grid">
+        <!-- ============== FORMULAIRE D'AJOUT / MODIFICATION ============== -->
+        <div>
+            <div class="panel">
+                <h2 id="form-title">Ajouter un site</h2>
+                <div class="edit-banner" id="edit-banner"></div>
+                <div class="field">
+                    <label for="f-name">Nom du site</label>
+                    <input type="text" id="f-name" placeholder="ex. Serveur Hôpital A" autocomplete="off">
+                </div>
+                <div class="field">
+                    <label for="f-host">Hôte (IP ou nom)</label>
+                    <input type="text" id="f-host" placeholder="ex. 192.168.1.20" autocomplete="off">
+                </div>
+                <div class="field">
+                    <label for="f-port">Port</label>
+                    <input type="number" id="f-port" value="8800" min="1" max="65535">
+                </div>
+                <div class="form-foot">
+                    <button id="btn-save" class="primary">＋ Ajouter</button>
+                    <button id="btn-cancel" style="display:none">Annuler</button>
+                </div>
+                <div class="hint">
+                    Renseignez le port du service <code>checker_service</code> du site
+                    (8800 par défaut). Le couple hôte + port doit être unique.
+                </div>
+            </div>
+
+            <div class="panel">
+                <h2>Journal des opérations</h2>
+                <div class="console" id="console"><span class="log-info">En attente d'une opération…</span></div>
+            </div>
+        </div>
+
+        <!-- ============== TABLEAU DES SITES ============== -->
+        <div>
+            <div class="panel">
+                <h2>Sites configurés <span id="badge-count" class="badge b-muted">—</span></h2>
+                <table>
+                    <thead>
+                        <tr>
+                            <th>Nom</th>
+                            <th>Hôte</th>
+                            <th class="num">Port</th>
+                            <th>État</th>
+                            <th class="actions-cell">Actions</th>
+                        </tr>
+                    </thead>
+                    <tbody id="sites-body">
+                        <tr class="empty-row"><td colspan="5">Chargement…</td></tr>
+                    </tbody>
+                </table>
+                <div class="hint">
+                    « Désactiver » suspend la relève d'un site sans le supprimer ;
+                    il n'apparaît plus dans la supervision active.
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <footer>
+        <span id="foot-status"><span class="dot pulse" style="background:var(--ok)"></span>Connecté</span>
+        — Superviseur multi-sites <code>checker_service</code>
+    </footer>
+
+<script>
+const API = "";
+const $ = id => document.getElementById(id);
+let sites = [];
+let editId = null;   // id du site en cours de modification (null = mode ajout)
+
+// ----------------------------------------------------------------------
+// Utilitaires
+// ----------------------------------------------------------------------
+function log(msg, kind = "info") {
+    const c = $("console");
+    if (c.dataset.fresh !== "1") { c.innerHTML = ""; c.dataset.fresh = "1"; }
+    const time = new Date().toLocaleTimeString("fr-FR");
+    const line = document.createElement("div");
+    line.className = "log-line";
+    line.innerHTML = `<span class="log-time">${time}</span> <span class="log-${kind}">${msg}</span>`;
+    c.appendChild(line);
+    c.scrollTop = c.scrollHeight;
+}
+
+function setFoot(ok, msg) {
+    $("foot-status").innerHTML = ok
+        ? '<span class="dot pulse" style="background:var(--ok)"></span>Connecté'
+        : '<span class="dot" style="background:var(--err)"></span>Hors ligne : ' + msg;
+}
+
+function esc(s) {
+    return String(s ?? "").replace(/[&<>"']/g, c =>
+        ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+}
+
+async function postJson(url, body) {
+    const opts = { method: "POST" };
+    if (body !== undefined) {
+        opts.headers = { "Content-Type": "application/json" };
+        opts.body = JSON.stringify(body);
+    }
+    const r = await fetch(API + url, opts);
+    const data = await r.json().catch(() => ({}));
+    if (!r.ok) throw new Error(data.error || ("HTTP " + r.status));
+    return data;
+}
+
+// ----------------------------------------------------------------------
+// Chargement et rendu de la liste
+// ----------------------------------------------------------------------
+async function load() {
+    try {
+        const r = await fetch(API + "/api/sites");
+        if (!r.ok) throw new Error("HTTP " + r.status);
+        const d = await r.json();
+        sites = d.sites || [];
+        render();
+        setFoot(true);
+    } catch (e) {
+        setFoot(false, e.message);
+        $("sites-body").innerHTML =
+            `<tr class="empty-row"><td colspan="5">Service injoignable : ${esc(e.message)}</td></tr>`;
+    }
+}
+
+function render() {
+    const tb = $("sites-body");
+    $("badge-count").className = "badge " + (sites.length ? "b-ok" : "b-muted");
+    $("badge-count").textContent = sites.length + " site" + (sites.length > 1 ? "s" : "");
+    if (!sites.length) {
+        tb.innerHTML = '<tr class="empty-row"><td colspan="5">Aucun site configuré. Ajoutez-en un à gauche.</td></tr>';
+        return;
+    }
+    tb.innerHTML = "";
+    sites.forEach(s => {
+        const tr = document.createElement("tr");
+        if (!s.enabled) tr.className = "row-disabled";
+        const stateBadge = s.enabled
+            ? '<span class="badge b-ok">Actif</span>'
+            : '<span class="badge b-muted">Désactivé</span>';
+        const url = `http://${s.host}:${s.port}/`;
+        tr.innerHTML =
+            `<td><b>${esc(s.name)}</b></td>` +
+            `<td class="host-cell"><code>${esc(s.host)}</code></td>` +
+            `<td class="num">${esc(s.port)}</td>` +
+            `<td>${stateBadge}</td>` +
+            `<td class="actions-cell">` +
+                `<button class="small" data-act="open" title="Ouvrir le site">↗ Ouvrir</button>` +
+                `<button class="small" data-act="toggle">${s.enabled ? "⏸ Désactiver" : "▶ Activer"}</button>` +
+                `<button class="small" data-act="edit">✎ Modifier</button>` +
+                `<button class="small danger" data-act="delete">🗑</button>` +
+            `</td>`;
+        tr.querySelector('[data-act="open"]').addEventListener("click", () => window.open(url, "_blank"));
+        tr.querySelector('[data-act="toggle"]').addEventListener("click", () => toggleSite(s));
+        tr.querySelector('[data-act="edit"]').addEventListener("click", () => startEdit(s));
+        tr.querySelector('[data-act="delete"]').addEventListener("click", () => deleteSite(s));
+        tb.appendChild(tr);
+    });
+}
+
+// ----------------------------------------------------------------------
+// Formulaire (ajout / modification)
+// ----------------------------------------------------------------------
+function startEdit(s) {
+    editId = s.id;
+    $("form-title").textContent = "Modifier le site";
+    $("f-name").value = s.name;
+    $("f-host").value = s.host;
+    $("f-port").value = s.port;
+    $("btn-save").innerHTML = "💾 Enregistrer";
+    $("btn-cancel").style.display = "";
+    const b = $("edit-banner");
+    b.classList.add("show");
+    b.textContent = `Modification de « ${s.name} ».`;
+    $("f-name").focus();
+}
+
+function resetForm() {
+    editId = null;
+    $("form-title").textContent = "Ajouter un site";
+    $("f-name").value = "";
+    $("f-host").value = "";
+    $("f-port").value = "8800";
+    $("btn-save").innerHTML = "＋ Ajouter";
+    $("btn-cancel").style.display = "none";
+    $("edit-banner").classList.remove("show");
+}
+
+async function saveForm() {
+    const name = $("f-name").value.trim();
+    const host = $("f-host").value.trim();
+    const port = parseInt($("f-port").value, 10);
+    if (!name) { log("✗ Le nom est obligatoire.", "err"); $("f-name").focus(); return; }
+    if (!host) { log("✗ L'hôte est obligatoire.", "err"); $("f-host").focus(); return; }
+    if (isNaN(port) || port < 1 || port > 65535) { log("✗ Port invalide.", "err"); $("f-port").focus(); return; }
+
+    $("btn-save").disabled = true;
+    try {
+        if (editId === null) {
+            const d = await postJson("/api/sites", { name, host, port });
+            log(`✓ Site ajouté : ${esc(d.site.name)} (${esc(d.site.host)}:${d.site.port}).`, "ok");
+        } else {
+            const d = await postJson(`/api/sites/${editId}`, { name, host, port });
+            log(`✓ Site modifié : ${esc(d.site.name)}.`, "ok");
+        }
+        resetForm();
+        await load();
+    } catch (e) {
+        log("✗ " + e.message, "err");
+    } finally {
+        $("btn-save").disabled = false;
+    }
+}
+
+async function toggleSite(s) {
+    try {
+        const d = await postJson(`/api/sites/${s.id}/toggle`);
+        log(`✓ ${esc(d.site.name)} : ${d.site.enabled ? "activé" : "désactivé"}.`, "ok");
+        await load();
+    } catch (e) { log("✗ " + e.message, "err"); }
+}
+
+async function deleteSite(s) {
+    if (!confirm(`Supprimer définitivement le site « ${s.name} » ?`)) return;
+    try {
+        await postJson(`/api/sites/${s.id}/delete`);
+        log(`✓ Site supprimé : ${esc(s.name)}.`, "ok");
+        if (editId === s.id) resetForm();
+        await load();
+    } catch (e) { log("✗ " + e.message, "err"); }
+}
+
+// ----------------------------------------------------------------------
+// Branchements
+// ----------------------------------------------------------------------
+$("btn-save").addEventListener("click", saveForm);
+$("btn-cancel").addEventListener("click", resetForm);
+$("refresh").addEventListener("click", load);
+["f-name", "f-host", "f-port"].forEach(id =>
+    $(id).addEventListener("keydown", e => { if (e.key === "Enter") saveForm(); }));
+
+load();
+</script>
+</body>
+</html>
