@@ -41,18 +41,36 @@ _drawn_len = 0      # longueur de la ligne d'état réellement dessinée (pour l
 # comportement.
 _dashboard = None
 
+# Mode silencieux (cf. set_quiet) : quand il est actif, log()/status()/clear() et
+# start_dashboard() ne produisent plus aucune sortie. Utilisé par l'option CLI
+# --no_output lorsque le service tourne en arrière-plan, fenêtre non accessible.
+_quiet = False
+
+
+def set_quiet(quiet=True):
+    """Active (ou non) le mode silencieux : plus aucune sortie console.
+
+    Quand il est actif, ``log()``, ``status()`` et ``clear()`` deviennent des
+    no-op et ``start_dashboard()`` renvoie False sans rien afficher. À poser AVANT
+    le premier log / le démarrage du tableau de bord (cf. --no_output).
+    """
+    global _quiet
+    _quiet = bool(quiet)
+
 
 def start_dashboard(tasks, title="Scheduler — tâches périodiques",
                     summary_provider=None):
     """Active le tableau de bord rich (tâches en haut, journal en bas).
 
     `tasks` est la liste de `RecurringTask` à afficher (leur état est lu à chaque
-    frame). `summary_provider` est un callable optionnel `nom_tâche -> str |
+    rendu). `summary_provider` est un callable optionnel `nom_tâche -> str |
     (texte, style)` alimentant la colonne « Valeur ». Renvoie True si le tableau
-    de bord a démarré, False sinon (rich indisponible ou sortie non interactive)
-    — dans ce cas l'affichage texte classique reste en vigueur.
+    de bord a démarré, False sinon (mode silencieux, rich indisponible ou sortie
+    non interactive) — dans ce cas l'affichage texte classique reste en vigueur.
     """
     global _dashboard
+    if _quiet:
+        return False
     dash = _dashboard_mod.RichDashboard(tasks, title=title,
                                         summary_provider=summary_provider)
     if dash.start():
@@ -71,6 +89,19 @@ def stop_dashboard():
     if _dashboard is not None:
         _dashboard.stop()
         _dashboard = None
+
+
+def dashboard_refresh():
+    """Redessine le tableau de bord rich s'il est actif (rendu événementiel).
+
+    Le tableau de bord ne se rafraîchit plus en continu : il est redessiné UNIQUEMENT
+    quand son contenu change. Le planificateur appelle cette fonction aux transitions
+    d'état d'une tâche (début/fin d'exécution) et le journal le fait à chaque nouveau
+    message. Sans tableau de bord actif (repli texte / mode silencieux), c'est un no-op.
+    """
+    d = _dashboard
+    if d is not None:
+        d.refresh()
 
 
 def _stream():
@@ -110,6 +141,8 @@ def status(text):
     plus longue sont effacés. Sans effet si la sortie n'est pas un terminal.
     """
     global _status
+    if _quiet:
+        return
     if _dashboard is not None:
         # La ligne d'état est remplacée par le tableau des tâches du tableau de bord.
         return
@@ -142,9 +175,12 @@ def log(text="", newline=True, refresh=False, statusline=None):
     la ligne d'état « flotte » toujours en bas.
     """
     global _status
+    if _quiet:
+        return
     if _dashboard is not None:
-        # `refresh` (ancienne maj de ligne d'état) est sans objet : le tableau des
-        # tâches s'auto-rafraîchit. Tout le reste va au journal du tableau de bord.
+        # `refresh` (ancienne maj de ligne d'état) est sans objet : la table des
+        # tâches est redessinée par le planificateur. Tout le reste va au journal
+        # du tableau de bord (qui se redessine à chaque nouveau message).
         if not refresh:
             _dashboard.log(text, newline=newline)
         return
@@ -174,6 +210,8 @@ def clear():
     une ligne d'état orpheline en bas de l'écran.
     """
     global _status
+    if _quiet:
+        return
     if _dashboard is not None:
         return
     if not _enabled():

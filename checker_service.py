@@ -19,8 +19,14 @@ Le service :
 
 Lancement :
     python checker_service.py [--host 0.0.0.0] [--port 8800] [--interval 60]
-                              [--logfile chemin]
+                              [--logfile chemin] [--no_output]
                               [--mirth-url URL] [--mirth-user ID] [--mirth-password PW]
+
+`--no_output` coupe tout l'affichage console (ni tableau de bord rich ni journal),
+pour un lancement en arrière-plan, fenêtre non accessible — le service et son API
+restent actifs. Sans cette option, le tableau de bord rich (si disponible) est
+rendu de façon ÉVÉNEMENTIELLE : redessiné uniquement quand son contenu change
+(début/fin d'un relevé, nouveau message de log), et non plus en continu.
 """
 
 import os
@@ -2564,6 +2570,11 @@ def main():
                         help="Rétention max de l'historique en jours : les relevés "
                              "plus anciens sont purgés automatiquement (purge horaire). "
                              "0 = illimité. (def: 15)")
+    parser.add_argument("--no_output", "--no-output", action="store_true",
+                        dest="no_output",
+                        help="N'affiche RIEN dans la console (ni tableau de bord rich "
+                             "ni journal). Pour un lancement en arrière-plan, fenêtre "
+                             "non accessible. Le service et son API restent actifs.")
     parser.add_argument("--logfile", default=DEFAULT_LOGFILE,
                         help="Fichier de log Mirth par défaut pour /api/mirth")
     parser.add_argument("--mirth-url", default=None,
@@ -2573,6 +2584,12 @@ def main():
     parser.add_argument("--mirth-password", default=None,
                         help="Mot de passe de connexion à l'API Mirth")
     args = parser.parse_args()
+
+    # Mode silencieux (--no_output) : coupe toute sortie console (tableau de bord
+    # rich ET logs). Posé AVANT le premier log / le démarrage du tableau de bord
+    # pour qu'aucun caractère ne soit écrit (utile en arrière-plan, sans fenêtre).
+    if args.no_output:
+        log.set_quiet(True)
 
     DEFAULT_LOGFILE = args.logfile
 
@@ -2631,7 +2648,8 @@ def main():
 
     # 4. Démarrage échelonné des tâches. Le hook on_complete (ligne d'état console)
     #    ne sert qu'au repli texte : sous le tableau de bord rich, la table des
-    #    tâches s'auto-rafraîchit et log.status() est neutralisé.
+    #    tâches est redessinée de façon événementielle par le planificateur (cf.
+    #    log.dashboard_refresh) et log.status() est neutralisé.
     status_line = make_scheduler_status_line(tasks)
     for t in tasks:
         t.on_complete = status_line

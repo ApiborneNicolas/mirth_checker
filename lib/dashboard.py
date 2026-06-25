@@ -3,16 +3,19 @@
 Tableau de bord console (rich) : deux sections empilées dans le terminal.
 
 - **En haut** : un tableau des tâches périodiques du planificateur (module, état,
-  durée du dernier relevé, délai avant la prochaine exécution), rafraîchi en
-  continu.
+  durée du dernier relevé, **heure** de la prochaine exécution).
 - **En bas** : le « Journal » — les messages de log défilent dans un panneau borné
   (les plus anciens sortent par le haut), ne gardant que les lignes qui tiennent
   dans la hauteur disponible (effet « tail »).
 
 Le rendu repose sur ``rich.live.Live`` en mode plein écran (``screen=True``) avec
-un ``Layout`` à deux régions. Les renderables (``_TaskTable`` / ``_Journal``)
-lisent l'état courant à CHAQUE frame, si bien que l'auto-rafraîchissement de
-``Live`` suffit à animer le tableau (décompte « prochaine exéc. ») et le journal.
+un ``Layout`` à deux régions. Le rafraîchissement est **événementiel** (``Live``
+créé avec ``auto_refresh=False``) : l'affichage n'est redessiné que lorsqu'il
+CHANGE — via ``refresh()``, appelé par le planificateur aux transitions d'état
+d'une tâche (début/fin d'exécution) et par ``log()`` à chaque nouveau message.
+C'est possible parce que la colonne « Prochaine exéc. » affiche désormais l'HEURE
+ABSOLUE (``HH:MM:SS``) du prochain relevé — une valeur stable — au lieu d'un
+décompte qui imposerait un rafraîchissement permanent (coûteux en production).
 
 Le module est tolérant : si ``rich`` est absent ou si la sortie n'est pas un
 terminal (service gelé, sortie redirigée, exécution headless),
@@ -21,7 +24,6 @@ sur l'affichage texte classique (logs persistants + ligne d'état réécrite).
 """
 
 import re
-import math
 import datetime
 import threading
 from collections import deque
@@ -67,16 +69,17 @@ def _fmt_duration(d):
     return f"{d:.1f} s"
 
 
-def _fmt_next(seconds):
-    """Délai avant prochaine exécution -> « 18 s » / « 42 min » / « 1.5 h » (None -> « — »)."""
-    if seconds is None:
+def _fmt_clock(ts):
+    """Heure absolue de la prochaine exécution -> « HH:MM:SS » (None -> « — »).
+
+    `ts` est la chaîne « YYYY-MM-DD HH:MM:SS » fournie par ``RecurringTask.status()``
+    (clé ``next_run_at``) ; seule l'heure est affichée. Cette valeur est ABSOLUE et
+    stable entre deux exécutions (elle ne défile pas), d'où l'inutilité d'un
+    rafraîchissement continu — contrairement à l'ancien décompte du délai restant.
+    """
+    if not ts:
         return "—"
-    s = int(math.ceil(seconds))
-    if s < 90:
-        return f"{s} s"
-    if s < 5400:        # < 90 min
-        return f"{round(s / 60)} min"
-    return f"{round(s / 3600, 1)} h"
+    return ts.split(" ", 1)[1] if " " in ts else ts
 
 
 class _TaskTable:
@@ -116,7 +119,7 @@ class _TaskTable:
                 etat,
                 Text(str(vtext), style=vstyle or ""),
                 _fmt_duration(st.get("last_duration")),
-                _fmt_next(st.get("next_run_in")),
+                _fmt_clock(st.get("next_run_at")),
             )
 
         yield Panel(table, title=self._dash.title, border_style="blue",
@@ -181,7 +184,11 @@ class RichDashboard:
     # -- cycle de vie ------------------------------------------------------
     def start(self):
         """Démarre le ``Live`` plein écran. Renvoie False si impossible (pas de
-        rich / pas un terminal) : l'appelant retombe alors sur l'affichage texte."""
+        rich / pas un terminal) : l'appelant retombe alors sur l'affichage texte.
+
+        Le ``Live`` est créé avec ``auto_refresh=False`` : il n'y a PAS de thread de
+        rafraîchissement périodique (coûteux en production). L'affichage n'est
+        redessiné que par les appels explicites à ``refresh()`` (cf. ce module)."""
         if not _RICH_OK:
             return False
         self._console = Console()
@@ -189,13 +196,28 @@ class RichDashboard:
             return False
         self._build_layout()
         self._live = Live(self._layout, console=self._console, screen=True,
-                          refresh_per_second=4, transient=False)
+                          auto_refresh=False, transient=False)
         try:
             self._live.start()
+            self._live.refresh()             # premier rendu (sinon écran vide)
         except Exception:
             self._live = None
             return False
         return True
+
+    def refresh(self):
+        """Redessine immédiatement (rendu événementiel : appelé quand l'état change).
+
+        Lit l'état courant de chaque tâche et le journal, puis redessine une seule
+        fois. Jamais levante : un échec de rendu ne doit pas interrompre l'appelant
+        (tâche du planificateur). ``Live.refresh()`` sérialise lui-même les appels
+        concurrents (plusieurs collecteurs sur des threads distincts)."""
+        live = self._live
+        if live is not None:
+            try:
+                live.refresh()
+            except Exception:
+                pass
 
     def stop(self):
         """Arrête le ``Live`` et restaure l'écran normal du terminal."""
@@ -225,10 +247,12 @@ class RichDashboard:
 
     # -- alimentation du journal ------------------------------------------
     def log(self, text, newline=True):
-        """Ajoute un message au journal (affiché à la prochaine frame du ``Live``).
+        """Ajoute un message au journal puis redessine (rendu événementiel).
 
         Le texte est découpé en lignes (une entrée par ligne, p. ex. un traceback)
-        et le préfixe « [tag] » des logs existants devient le nom du logger.
+        et le préfixe « [tag] » des logs existants devient le nom du logger. Comme
+        le ``Live`` ne se rafraîchit plus tout seul, on déclenche un ``refresh()``
+        pour que le nouveau message apparaisse immédiatement.
         """
         text = (text or "").strip("\n")
         lines = text.split("\n") if text else [""]
@@ -236,6 +260,7 @@ class RichDashboard:
         with self._lock:
             for ln in lines:
                 self._journal.append(self._parse_line(ln, now))
+        self.refresh()
 
     @staticmethod
     def _parse_line(line, now):

@@ -80,6 +80,9 @@ class RecurringTask:
                 break
 
             self.executing = True
+            # Rendu événementiel : bascule l'affichage de la tâche en « en cours ».
+            # (no-op hors tableau de bord rich actif.)
+            log.dashboard_refresh()
             start = time.monotonic()
             try:
                 self.func()
@@ -120,6 +123,11 @@ class RecurringTask:
                         f"resynchronisation sur la grille.")
             self._next_run_monotonic = next_run
 
+            # Rendu événementiel : l'état de la tâche vient de changer (en attente,
+            # durée, valeur, heure de la prochaine exécution) — on redessine le
+            # tableau de bord UNE fois, au lieu de le rafraîchir en continu.
+            log.dashboard_refresh()
+
     def start(self):
         """Démarre la boucle dans un thread daemon. Sans effet si déjà lancée."""
         if self._thread and self._thread.is_alive():
@@ -146,7 +154,22 @@ class RecurringTask:
             return None
         return max(0.0, self._next_run_monotonic - time.monotonic())
 
+    @property
+    def next_run_at(self):
+        """Heure murale (datetime) de la prochaine exécution (None si non planifiée).
+
+        Obtenue en ramenant le délai monotone restant (`next_run_in`) à l'horloge
+        murale. La valeur ABSOLUE ainsi calculée est stable d'un instant à l'autre
+        (elle ne « défile » pas), ce qui permet au tableau de bord console de
+        l'afficher en « HH:MM:SS » sans rafraîchissement continu.
+        """
+        secs = self.next_run_in
+        if secs is None:
+            return None
+        return datetime.datetime.now() + datetime.timedelta(seconds=secs)
+
     def status(self):
+        nra = self.next_run_at
         return {
             "name": self.name,
             "interval": self.interval,
@@ -154,6 +177,9 @@ class RecurringTask:
             "running": self.is_running,
             "executing": self.executing,
             "next_run_in": self.next_run_in,
+            # Heure absolue (chaîne) du prochain relevé : affichée telle quelle par
+            # le tableau de bord console et exposée via /api/status.
+            "next_run_at": nra.strftime("%Y-%m-%d %H:%M:%S") if nra else None,
             "run_count": self.run_count,
             "last_run": self.last_run,
             "last_error": self.last_error,
