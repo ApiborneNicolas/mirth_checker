@@ -5,17 +5,15 @@ REM Go to the root directory
 cd /d "%~dp0.."
 
 
-REM ---- Détection de la version de Python installée ----
+REM ---- Choix de l'interpreteur Python ----
+REM Priorite au venv du projet (cree par venv_create.bat), sinon le python du PATH.
+REM On evite "python3" : sur Windows c'est souvent l'alias Microsoft Store
+REM (WindowsApps\python3.exe), un interpreteur different de celui du PATH.
 set "PYTHON_EXE="
-where python3 >nul 2>nul
-if %ERRORLEVEL% equ 0 (
-    set "PYTHON_EXE=python3"
+if exist "venv\Scripts\python.exe" (
+    set "PYTHON_EXE=venv\Scripts\python.exe"
 ) else (
-    REM Test de la commande python si python3 n'existe pas
-    where python >nul 2>nul
-    if %ERRORLEVEL% equ 0 (
-        set "PYTHON_EXE=python"
-    )
+    where python >nul 2>nul && set "PYTHON_EXE=python"
 )
 
 if "%PYTHON_EXE%"=="" (
@@ -24,39 +22,25 @@ if "%PYTHON_EXE%"=="" (
     goto fin
 )
 
-echo [INFO] Python détecté et utilisé : %PYTHON_EXE%
+echo [INFO] Python utilise : %PYTHON_EXE%
+"%PYTHON_EXE%" --version
 
 
-REM 1. Récupère la ligne "Location:"
-REM Récupère le chemin site-packages dans la variable LOCATION
-for /f "usebackq delims=" %%L in (`powershell -NoLogo -NoProfile -Command "%PYTHON_EXE% -m pip show pyinstaller | Select-String '^LOCATION' | %% { $_.ToString().Split(':',2)[1].Trim() }"`) do (
-    set "PKGROOT=%%L"
+REM ---- Installer les dependances ----
+"%PYTHON_EXE%" -m pip install --upgrade pip
+"%PYTHON_EXE%" -m pip install -r requirements.txt
+REM pyinstaller n'est pas dans requirements.txt : on l'installe explicitement.
+"%PYTHON_EXE%" -m pip install pyinstaller
+
+REM ---- Verification que PyInstaller est disponible ----
+REM On l'appelle via "python -m PyInstaller" : pas besoin de localiser le .exe.
+"%PYTHON_EXE%" -m PyInstaller --version >nul 2>nul
+if not %ERRORLEVEL% equ 0 (
+    echo [ERREUR] PyInstaller introuvable malgre l'installation. Abandon.
+    pause
+    goto fin
 )
-
-REM 2. Remonte d'un niveau pour être dans le dossier parent de site-packages
-REM PKGROOT = ...\Python3xx\site-packages
-REM On veut ...\Python3xx
-for /f "usebackq delims=" %%P in (`powershell -NoLogo -NoProfile -Command "Split-Path -Parent '%PKGROOT%'"`) do (
-    set "PKGROOT=%%P"
-)
-
-set "PYINSTALLER=%PKGROOT%\Scripts\pyinstaller.exe"
-
-REM Affiche le résultat
-echo PyInstaller devrait etre ici : "%PYINSTALLER%"
-REM Vérifie l'existence
-if exist "%PYINSTALLER%" (
-    echo [OK] pyinstaller.exe trouve.
-    %PYINSTALLER% --version
-) else (
-    echo [ERREUR] pyinstaller.exe introuvable. Installe-le avec :
-    echo     %PYTHON_EXE% -m pip install pyinstaller
-)
-
-
-REM ---- Installer les dépendances (optionnel si déjà installées) ----
-%PYTHON_EXE% -m pip install --upgrade pip
-%PYTHON_EXE% -m pip install -r requirements.txt
+echo [OK] PyInstaller disponible.
 
 REM ---- Verification de la configuration SMTP ----
 if not exist ".smtp_config.py" (
@@ -71,18 +55,18 @@ if not exist ".mirth_config.py" (
 REM ---- Compilation ----
 echo.
 echo [INFO] Compilation des scripts...
-%PYINSTALLER%  --onefile system_state.py
-%PYINSTALLER%  --onefile --add-data ".mirth_config.py;." mirth_api.py
-%PYINSTALLER%  --onefile --add-data ".mirth_config.py;." mirth_simulator.py
-%PYINSTALLER%  --onefile --add-data ".smtp_config.py;." quickmail.py
-%PYINSTALLER%  --onefile --add-data ".smtp_config.py;." mirth_logs_parser.py
+"%PYTHON_EXE%" -m PyInstaller --onefile system_state.py
+"%PYTHON_EXE%" -m PyInstaller --onefile --add-data ".mirth_config.py;." mirth_api.py
+"%PYTHON_EXE%" -m PyInstaller --onefile --add-data ".mirth_config.py;." mirth_simulator.py
+"%PYTHON_EXE%" -m PyInstaller --onefile --add-data ".smtp_config.py;." quickmail.py
+"%PYTHON_EXE%" -m PyInstaller --onefile --add-data ".smtp_config.py;." mirth_logs_parser.py
 REM --collect-submodules rich : embarque TOUS les sous-modules de rich, dont
-REM ceux importés paresseusement (rich._win32_console pour la console Windows
-REM "legacy" d'un .exe lancé par double-clic). Sans ça, l'analyse statique de
+REM ceux importes paresseusement (rich._win32_console pour la console Windows
+REM "legacy" d'un .exe lance par double-clic). Sans ca, l'analyse statique de
 REM PyInstaller les rate : le thread de rendu de rich.live plante (ModuleNotFound)
 REM et le tableau de bord reste un ecran noir. --add-data "web;web" embarque les
 REM pages statiques (servies depuis sys._MEIPASS en mode gele).
-%PYINSTALLER%  --onefile --collect-submodules rich --add-data ".smtp_config.py;." --add-data ".mirth_config.py;." --add-data "web;web" checker_service.py
+"%PYTHON_EXE%" -m PyInstaller --onefile --collect-submodules rich --add-data ".smtp_config.py;." --add-data ".mirth_config.py;." --add-data "web;web" checker_service.py
 echo.
 echo [OK] Compilation terminee !
 
