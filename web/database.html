@@ -282,7 +282,7 @@ function renderInfo(d) {
     const rd = d.retention_days;
     if (rd !== undefined && rd !== null) {
         $("retention-hint").textContent = rd > 0
-            ? `Rétention automatique : ${rd} jour(s) — purge horaire des relevés plus anciens (réglable via --retention-days).`
+            ? `Rétention automatique : ${rd} jour(s) — purge quotidienne (03:00) des relevés plus anciens (réglable via --retention-days).`
             : "Rétention automatique : illimitée (aucune purge auto).";
         if (!purgeInit && rd > 0) { $("purge-days").value = rd; }
         purgeInit = true;

@@ -67,7 +67,11 @@ SYSTEM_DRIVE = os.environ.get("SystemDrive", "C:") + os.sep if os.name == "nt" e
 # main() depuis --retention-days. 0 = illimité (aucune purge automatique).
 RETENTION_DAYS = 15
 RETENTION_TASK_NAME = "retention-purge"
-RETENTION_PURGE_INTERVAL = 3600   # purge horaire (la rétention est exprimée en jours)
+RETENTION_PURGE_INTERVAL = 24 * 3600   # cadence quotidienne (interval indicatif)
+# Heure (murale) de la purge quotidienne : 03:00, à l'heure creuse de la nuit, pour
+# ne pas peser sur la machine en journée (la rétention étant exprimée en jours, une
+# seule purge par jour suffit largement).
+RETENTION_PURGE_TIME = datetime.time(3, 0)
 
 # URL de base publique du service (ex. http://serveur:8800), utilisée pour bâtir
 # les liens profonds dans les e-mails d'alerte (ouverture du dashboard sur le
@@ -992,8 +996,9 @@ def scheduled_purge():
 
     Supprime les relevés de plus de `RETENTION_DAYS` jours dans toutes les tables
     horodatées (cf. `database.purge_older_than`). No-op si la rétention est
-    désactivée (RETENTION_DAYS <= 0). Cadence horaire (la rétention étant en jours,
-    une purge fréquente est inutile mais peu coûteuse).
+    désactivée (RETENTION_DAYS <= 0). Exécutée une fois par jour à 03:00 (heure
+    creuse), plus une fois au démarrage du service (la rétention étant en jours,
+    une seule purge quotidienne suffit).
     """
     if RETENTION_DAYS <= 0:
         _task_summaries[RETENTION_TASK_NAME] = ("illimitée", "dim")
@@ -2568,8 +2573,8 @@ def main():
                              "en secondes (def: 5) — évite un pic de charge au tick")
     parser.add_argument("--retention-days", type=int, default=15,
                         help="Rétention max de l'historique en jours : les relevés "
-                             "plus anciens sont purgés automatiquement (purge horaire). "
-                             "0 = illimité. (def: 15)")
+                             "plus anciens sont purgés automatiquement (purge quotidienne "
+                             "à 03:00). 0 = illimité. (def: 15)")
     parser.add_argument("--no_output", "--no-output", action="store_true",
                         dest="no_output",
                         help="N'affiche RIEN dans la console (ni tableau de bord rich "
@@ -2625,12 +2630,14 @@ def main():
         RecurringTask(args.interval, scheduled_mirth_overview, name="mirth-overview-collector"),
         RecurringTask(args.interval, scheduled_device_check, name=DEVICE_TASK_NAME),
     ]
-    # Tâche de rétention (purge de l'historique trop ancien) — cadence horaire,
-    # indépendante de --interval. Ajoutée seulement si la rétention est active ;
-    # sa première exécution (run_immediately) applique la rétention au démarrage.
+    # Tâche de rétention (purge de l'historique trop ancien) — exécutée une fois
+    # par jour à 03:00 (heure creuse), indépendamment de --interval. Ajoutée
+    # seulement si la rétention est active ; run_immediately applique en plus la
+    # rétention dès le démarrage (sans attendre 03:00).
     if RETENTION_DAYS > 0:
         tasks.append(RecurringTask(RETENTION_PURGE_INTERVAL, scheduled_purge,
-                                   name=RETENTION_TASK_NAME))
+                                   name=RETENTION_TASK_NAME,
+                                   daily_at=RETENTION_PURGE_TIME))
 
     # 2. Tableau de bord console (rich) : tâches du planificateur en haut, journal
     #    défilant en bas. Démarré tôt pour capturer les logs d'initialisation. Si
@@ -2658,7 +2665,8 @@ def main():
           f"(relevés toutes les {args.interval}s, décalage {args.stagger}s entre chacune).")
     if RETENTION_DAYS > 0:
         log.log(f"[checker_service] Rétention de l'historique : {RETENTION_DAYS} jours "
-                f"(purge automatique horaire).")
+                f"(purge automatique quotidienne à "
+                f"{RETENTION_PURGE_TIME.strftime('%H:%M')}).")
     else:
         log.log("[checker_service] Rétention de l'historique : illimitée (aucune purge auto).")
 

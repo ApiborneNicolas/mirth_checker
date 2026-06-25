@@ -19,27 +19,36 @@ from . import log
 
 class RecurringTask:
     def __init__(self, interval, func, name="recurring-task", run_immediately=True,
-                 start_delay=0.0, anchor=None, on_complete=None):
+                 start_delay=0.0, anchor=None, on_complete=None, daily_at=None):
         """
         Args:
-            interval (float): délai en secondes entre deux exécutions.
+            interval (float): délai en secondes entre deux exécutions. Ignoré comme
+                cadence quand `daily_at` est fourni (exécution quotidienne).
             func (callable): fonction à exécuter (sans argument).
             name (str): nom du thread (utile pour le débogage).
             run_immediately (bool): exécuter une première fois dès le démarrage.
             start_delay (float): décalage initial (s) avant la toute première
                 exécution. Sert à étaler le démarrage de plusieurs tâches afin
                 qu'elles ne sondent pas le système exactement au même instant
-                (cf. start_staggered).
+                (cf. start_staggered). Ignoré quand `daily_at` est fourni.
             anchor (float|None): origine de temps (référence `time.monotonic()`)
                 sur laquelle aligner la grille des déclenchements. Partagé entre
                 plusieurs tâches, il garantit que toutes suivent le MÊME rythme
                 `interval` et conservent un décalage `start_delay` constant à
                 chaque cycle (pas de dérive). Si None, l'ancre est posée au
-                démarrage du thread.
+                démarrage du thread. Ignoré quand `daily_at` est fourni.
             on_complete (callable|None): hook appelé après CHAQUE exécution (succès
                 ou échec), une fois `last_duration` mis à jour, avec la tâche en
                 argument. Sert p. ex. à rafraîchir une ligne d'état console. Les
                 exceptions qu'il lève sont ignorées (ne doivent pas tuer la boucle).
+            daily_at (datetime.time|None): si fourni, la tâche s'exécute UNE FOIS
+                PAR JOUR à cette heure murale (au lieu de la grille `interval`).
+                L'échéance est recalculée à chaque cycle depuis l'horloge murale, ce
+                qui reste correct malgré les changements d'heure (DST) ou les
+                ajustements d'horloge. `run_immediately` provoque en plus une
+                exécution au démarrage. Convient aux tâches de maintenance qu'on veut
+                à heure creuse (p. ex. purge de rétention à 03:00) plutôt qu'à
+                cadence fixe.
         """
         self.interval = interval
         self.func = func
@@ -48,6 +57,7 @@ class RecurringTask:
         self.start_delay = start_delay
         self.anchor = anchor
         self.on_complete = on_complete
+        self.daily_at = daily_at
         self._stop_event = threading.Event()
         self._thread = None
         self.last_run = None
@@ -58,7 +68,60 @@ class RecurringTask:
         self.executing = False         # func() est en cours d'exécution (ce tick)
         self._next_run_monotonic = None  # échéance (time.monotonic) du prochain relevé
 
+    def _execute(self):
+        """Exécute `func` une fois : mesure la durée, capture l'erreur, joue le hook.
+
+        Ne lève jamais (une tâche qui échoue ne doit pas tuer sa boucle). Bascule
+        l'affichage de la tâche en « en cours » au début (rendu événementiel) ;
+        l'échéance suivante et le redessin de fin sont gérés par l'appelant.
+        """
+        self.executing = True
+        # Rendu événementiel : bascule l'affichage de la tâche en « en cours ».
+        # (no-op hors tableau de bord rich actif.)
+        log.dashboard_refresh()
+        start = time.monotonic()
+        try:
+            self.func()
+            self.last_run = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            self.last_error = None
+            self.run_count += 1
+        except Exception as e:  # une tâche qui échoue ne doit pas tuer la boucle
+            self.last_error = str(e)
+            # Logs persistants (effacent/redessinent la ligne d'état console).
+            log.log(f"[scheduler:{self.name}] Erreur : {e}")
+            log.log(traceback.format_exc(), newline=False)
+        finally:
+            self.last_duration = round(time.monotonic() - start, 4)
+            self.executing = False
+
+        # Hook de fin d'exécution (ligne d'état console, etc.). Toute erreur ici est
+        # avalée pour ne pas interrompre la boucle de relevé.
+        if self.on_complete is not None:
+            try:
+                self.on_complete(self)
+            except Exception:
+                pass
+
+    def _seconds_until_daily(self):
+        """Secondes (horloge murale) jusqu'à la prochaine occurrence de `daily_at`.
+
+        Toujours strictement positif : si l'heure dite est déjà passée (ou est
+        exactement maintenant), vise le lendemain — ce qui évite une double
+        exécution juste après un relevé.
+        """
+        now = datetime.datetime.now()
+        target = now.replace(hour=self.daily_at.hour, minute=self.daily_at.minute,
+                             second=self.daily_at.second, microsecond=0)
+        if target <= now:
+            target += datetime.timedelta(days=1)
+        return (target - now).total_seconds()
+
     def _loop(self):
+        # Tâche quotidienne à heure fixe : boucle dédiée (horloge murale).
+        if self.daily_at is not None:
+            self._loop_daily()
+            return
+
         # Grille de déclenchement absolue : chaque relevé est calé sur
         # `anchor + start_delay + k * interval` (k = 0, 1, 2, ...). Contrairement à
         # une attente « interval - durée » qui dérive au fil des cycles (jitter de
@@ -79,32 +142,7 @@ class RecurringTask:
             if self._stop_event.is_set():
                 break
 
-            self.executing = True
-            # Rendu événementiel : bascule l'affichage de la tâche en « en cours ».
-            # (no-op hors tableau de bord rich actif.)
-            log.dashboard_refresh()
-            start = time.monotonic()
-            try:
-                self.func()
-                self.last_run = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                self.last_error = None
-                self.run_count += 1
-            except Exception as e:  # une tâche qui échoue ne doit pas tuer la boucle
-                self.last_error = str(e)
-                # Logs persistants (effacent/redessinent la ligne d'état console).
-                log.log(f"[scheduler:{self.name}] Erreur : {e}")
-                log.log(traceback.format_exc(), newline=False)
-            finally:
-                self.last_duration = round(time.monotonic() - start, 4)
-                self.executing = False
-
-            # Hook de fin d'exécution (ligne d'état console, etc.). Toute erreur
-            # ici est avalée pour ne pas interrompre la boucle de relevé.
-            if self.on_complete is not None:
-                try:
-                    self.on_complete(self)
-                except Exception:
-                    pass
+            self._execute()
 
             # Échéance suivante sur la grille. Si l'exécution a débordé d'un ou
             # plusieurs créneaux, on saute les ticks manqués pour se resynchroniser
@@ -126,6 +164,34 @@ class RecurringTask:
             # Rendu événementiel : l'état de la tâche vient de changer (en attente,
             # durée, valeur, heure de la prochaine exécution) — on redessine le
             # tableau de bord UNE fois, au lieu de le rafraîchir en continu.
+            log.dashboard_refresh()
+
+    def _loop_daily(self):
+        """Boucle d'une tâche quotidienne exécutée à heure fixe (`daily_at`).
+
+        L'échéance est recalculée à CHAQUE cycle depuis l'horloge murale (prochaine
+        occurrence de l'heure dite) plutôt que sur la grille monotone : le déclenchement
+        reste donc calé sur l'heure réelle malgré les changements d'heure (DST) et les
+        ajustements d'horloge système. `run_immediately` provoque en plus une exécution
+        au démarrage (utile pour appliquer la tâche sans attendre l'heure dite).
+        """
+        if self.run_immediately:
+            self._next_run_monotonic = time.monotonic()         # exécution immédiate
+        else:
+            self._next_run_monotonic = time.monotonic() + self._seconds_until_daily()
+
+        while not self._stop_event.is_set():
+            delay = self._next_run_monotonic - time.monotonic()
+            if delay > 0 and self._stop_event.wait(delay):
+                break
+            if self._stop_event.is_set():
+                break
+
+            self._execute()
+
+            # Prochaine occurrence de l'heure dite (recalcul wall-clock => robuste
+            # aux changements d'heure ; pas de double exécution, cf. _seconds_until_daily).
+            self._next_run_monotonic = time.monotonic() + self._seconds_until_daily()
             log.dashboard_refresh()
 
     def start(self):
