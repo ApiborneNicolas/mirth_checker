@@ -66,13 +66,19 @@ REM "legacy" d'un .exe lance par double-clic). Sans ca, l'analyse statique de
 REM PyInstaller les rate : le thread de rendu de rich.live plante (ModuleNotFound)
 REM et le tableau de bord reste un ecran noir. --add-data "web;web" embarque les
 REM pages statiques (servies depuis sys._MEIPASS en mode gele).
-"%PYTHON_EXE%" -m PyInstaller --onefile --collect-submodules rich --add-data ".smtp_config.py;." --add-data ".mirth_config.py;." --add-data "web;web" checker_service.py
+REM --collect-submodules cryptography : embarque le backend TLS utilise pour
+REM generer le certificat auto-signe au 1er lancement (HTTPS). Le certificat et la
+REM base sont crees a COTE de l'exe (dossier persistant), pas dans _MEIPASS. La
+REM config de securite (.mirth_config.py : HTTPS_MODE, ALLOWED_IPS, AUTH_ENABLED...)
+REM est lue A COTE de l'exe (a deposer par l'exploitant), pas embarquee.
+"%PYTHON_EXE%" -m PyInstaller --onefile --collect-submodules rich --collect-submodules cryptography --add-data ".smtp_config.py;." --add-data ".mirth_config.py;." --add-data "web;web" checker_service.py
 REM superviseur : meta-superviseur des instances checker_service. Embarque ses
-REM propres pages (web_superviseur) ; pas de config SMTP/Mirth (il interroge les
-REM sites via HTTP). --collect-submodules rich pour le tableau de bord console
-REM (meme contrainte que checker_service). La base superviseur.db est creee a
-REM cote de l'exe au lancement.
-"%PYTHON_EXE%" -m PyInstaller --onefile --collect-submodules rich --add-data "web_superviseur;web_superviseur" superviseur.py
+REM propres pages (web_superviseur) + la config SMTP (envoi par e-mail des mots de
+REM passe generes pour ses propres comptes). --collect-submodules rich (tableau de
+REM bord) et cryptography (HTTPS). La base superviseur.db et le certificat sont
+REM crees a cote de l'exe au lancement ; la config de securite (.mirth_config.py)
+REM est lue a cote de l'exe.
+"%PYTHON_EXE%" -m PyInstaller --onefile --collect-submodules rich --collect-submodules cryptography --add-data ".smtp_config.py;." --add-data "web_superviseur;web_superviseur" superviseur.py
 echo.
 echo [OK] Compilation terminee !
 

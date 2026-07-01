@@ -364,6 +364,85 @@ def init_db(db_path=DEFAULT_DB_PATH):
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_device_history_ts ON device_history(timestamp)"
         )
+
+        # Sécurité : comptes web, sessions et clés API (schéma factorisé, réutilisé
+        # aussi par superviseur.db via init_auth_tables).
+        _create_auth_tables(conn)
+        conn.commit()
+    finally:
+        conn.close()
+    return db_path
+
+
+def _create_auth_tables(conn):
+    """Crée les tables d'authentification (comptes / sessions / clés API).
+
+    Tables de config/auth PERSISTANTES : jamais purgées par purge_older_than()
+    ni reset_db() (préserver les comptes). Seule `web_sessions` est nettoyée de
+    ses lignes expirées par une tâche dédiée (purge_expired_sessions).
+      - `users`        : comptes (identifiant, e-mail, hash mdp, rôle...). Le mot
+        de passe n'est JAMAIS stocké en clair (pbkdf2$...) ni affiché.
+      - `web_sessions` : jetons de session actifs (seul le HASH du jeton est
+        stocké). `expires_at` glisse à now+TTL à chaque requête valide (24 h).
+      - `api_keys`     : clés API (seul le HASH est stocké) pour les clients
+        machine (superviseur), révocables sans divulguer de mot de passe.
+    """
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS users (
+            username      TEXT    PRIMARY KEY,
+            email         TEXT    NOT NULL,
+            password_hash TEXT    NOT NULL,
+            role          TEXT    NOT NULL DEFAULT 'technicien',
+            enabled       INTEGER NOT NULL DEFAULT 1,
+            created_at    TEXT    NOT NULL,
+            last_login_at TEXT,
+            last_seen_at  TEXT,
+            updated_at    TEXT
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS web_sessions (
+            token_hash    TEXT    PRIMARY KEY,
+            username      TEXT    NOT NULL,
+            created_at    TEXT    NOT NULL,
+            expires_at    TEXT    NOT NULL,
+            last_seen_ip  TEXT
+        )
+        """
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_web_sessions_user ON web_sessions(username)"
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_web_sessions_exp ON web_sessions(expires_at)"
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS api_keys (
+            key_hash      TEXT    PRIMARY KEY,
+            label         TEXT,
+            username      TEXT,
+            enabled       INTEGER NOT NULL DEFAULT 1,
+            created_at    TEXT    NOT NULL,
+            last_used_at  TEXT
+        )
+        """
+    )
+
+
+def init_auth_tables(db_path):
+    """Crée uniquement les tables d'authentification dans `db_path`.
+
+    Permet à d'autres bases (ex. superviseur.db) de partager exactement le même
+    schéma de comptes/sessions/clés et de réutiliser les accesseurs ci-dessous
+    (en passant `db_path=`) ainsi que `lib.auth`.
+    """
+    conn = _connect(db_path)
+    try:
+        _create_auth_tables(conn)
         conn.commit()
     finally:
         conn.close()
@@ -1364,6 +1443,267 @@ def purge_older_than(days=30, db_path=DEFAULT_DB_PATH):
             pass
         conn.commit()
         return deleted   # total de lignes supprimées, toutes tables confondues
+    finally:
+        conn.close()
+
+
+# ==========================================================================
+# COMPTES / SESSIONS / CLÉS API (sécurité)
+# ==========================================================================
+def _now_str():
+    return datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+
+def count_users(db_path=DEFAULT_DB_PATH):
+    """Nombre de comptes. 0 => bootstrap (accès loopback toléré, cf. checker_service)."""
+    conn = _connect(db_path)
+    try:
+        return conn.execute("SELECT COUNT(*) FROM users").fetchone()[0]
+    finally:
+        conn.close()
+
+
+def create_user(username, email, password_hash, role="technicien",
+                enabled=True, db_path=DEFAULT_DB_PATH):
+    """Crée un compte. Renvoie False si l'identifiant existe déjà (pas d'écrasement)."""
+    now = _now_str()
+    conn = _connect(db_path)
+    try:
+        conn.execute(
+            "INSERT INTO users (username, email, password_hash, role, enabled, "
+            "created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (username, email, password_hash, role, 1 if enabled else 0, now, now))
+        conn.commit()
+        return True
+    except sqlite3.IntegrityError:
+        return False
+    finally:
+        conn.close()
+
+
+def get_user(username, db_path=DEFAULT_DB_PATH):
+    """Renvoie le compte (AVEC password_hash — usage interne login). None si absent."""
+    conn = _connect(db_path)
+    try:
+        r = conn.execute("SELECT * FROM users WHERE username = ?", (username,)).fetchone()
+        return dict(r) if r else None
+    finally:
+        conn.close()
+
+
+def list_users(db_path=DEFAULT_DB_PATH):
+    """Liste des comptes SANS le hash de mot de passe (pour la page d'admin)."""
+    conn = _connect(db_path)
+    try:
+        rows = conn.execute(
+            "SELECT username, email, role, enabled, created_at, last_login_at, "
+            "last_seen_at FROM users ORDER BY username"
+        ).fetchall()
+        out = []
+        for r in rows:
+            d = dict(r)
+            d["enabled"] = bool(d["enabled"])
+            out.append(d)
+        return out
+    finally:
+        conn.close()
+
+
+def set_password(username, password_hash, db_path=DEFAULT_DB_PATH):
+    """Met à jour le hash du mot de passe. Renvoie True si le compte existait."""
+    conn = _connect(db_path)
+    try:
+        cur = conn.execute(
+            "UPDATE users SET password_hash = ?, updated_at = ? WHERE username = ?",
+            (password_hash, _now_str(), username))
+        conn.commit()
+        return cur.rowcount > 0
+    finally:
+        conn.close()
+
+
+def set_user_enabled(username, enabled, db_path=DEFAULT_DB_PATH):
+    """Active/désactive un compte. Un compte désactivé voit ses sessions coupées."""
+    conn = _connect(db_path)
+    try:
+        cur = conn.execute(
+            "UPDATE users SET enabled = ?, updated_at = ? WHERE username = ?",
+            (1 if enabled else 0, _now_str(), username))
+        if not enabled:
+            conn.execute("DELETE FROM web_sessions WHERE username = ?", (username,))
+        conn.commit()
+        return cur.rowcount > 0
+    finally:
+        conn.close()
+
+
+def delete_user(username, db_path=DEFAULT_DB_PATH):
+    """Supprime un compte et toutes ses sessions."""
+    conn = _connect(db_path)
+    try:
+        conn.execute("DELETE FROM web_sessions WHERE username = ?", (username,))
+        cur = conn.execute("DELETE FROM users WHERE username = ?", (username,))
+        conn.commit()
+        return cur.rowcount > 0
+    finally:
+        conn.close()
+
+
+def touch_user_login(username, db_path=DEFAULT_DB_PATH):
+    """Horodate la dernière connexion réussie."""
+    conn = _connect(db_path)
+    try:
+        conn.execute("UPDATE users SET last_login_at = ? WHERE username = ?",
+                     (_now_str(), username))
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def touch_user_seen(username, db_path=DEFAULT_DB_PATH):
+    """Horodate la dernière activité authentifiée (appel throttlé par l'appelant)."""
+    conn = _connect(db_path)
+    try:
+        conn.execute("UPDATE users SET last_seen_at = ? WHERE username = ?",
+                     (_now_str(), username))
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def insert_session(token_hash, username, expires_at, ip=None, db_path=DEFAULT_DB_PATH):
+    """Enregistre une session active (seul le HASH du jeton est stocké)."""
+    conn = _connect(db_path)
+    try:
+        conn.execute(
+            "INSERT OR REPLACE INTO web_sessions (token_hash, username, created_at, "
+            "expires_at, last_seen_ip) VALUES (?, ?, ?, ?, ?)",
+            (token_hash, username, _now_str(), expires_at, ip))
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def get_session(token_hash, db_path=DEFAULT_DB_PATH):
+    """Session jointe au compte : renvoie username/expires_at + role/enabled/email."""
+    conn = _connect(db_path)
+    try:
+        r = conn.execute(
+            "SELECT s.token_hash, s.username, s.created_at, s.expires_at, "
+            "u.role AS role, u.enabled AS enabled, u.email AS email "
+            "FROM web_sessions s LEFT JOIN users u ON u.username = s.username "
+            "WHERE s.token_hash = ?", (token_hash,)).fetchone()
+        return dict(r) if r else None
+    finally:
+        conn.close()
+
+
+def touch_session(token_hash, expires_at, ip=None, db_path=DEFAULT_DB_PATH):
+    """Fait glisser l'échéance de la session (fenêtre 24 h)."""
+    conn = _connect(db_path)
+    try:
+        if ip is not None:
+            conn.execute("UPDATE web_sessions SET expires_at = ?, last_seen_ip = ? "
+                         "WHERE token_hash = ?", (expires_at, ip, token_hash))
+        else:
+            conn.execute("UPDATE web_sessions SET expires_at = ? WHERE token_hash = ?",
+                         (expires_at, token_hash))
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def delete_session(token_hash, db_path=DEFAULT_DB_PATH):
+    """Révoque une session (déconnexion)."""
+    conn = _connect(db_path)
+    try:
+        conn.execute("DELETE FROM web_sessions WHERE token_hash = ?", (token_hash,))
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def delete_user_sessions(username, db_path=DEFAULT_DB_PATH):
+    """Révoque TOUTES les sessions d'un compte (« révoquer tous mes jetons »)."""
+    conn = _connect(db_path)
+    try:
+        cur = conn.execute("DELETE FROM web_sessions WHERE username = ?", (username,))
+        conn.commit()
+        return cur.rowcount or 0
+    finally:
+        conn.close()
+
+
+def purge_expired_sessions(db_path=DEFAULT_DB_PATH):
+    """Supprime les sessions expirées. Renvoie le nombre de lignes supprimées."""
+    conn = _connect(db_path)
+    try:
+        cur = conn.execute("DELETE FROM web_sessions WHERE expires_at < ?", (_now_str(),))
+        conn.commit()
+        return cur.rowcount or 0
+    finally:
+        conn.close()
+
+
+def insert_api_key(key_hash, label=None, username=None, db_path=DEFAULT_DB_PATH):
+    """Enregistre une clé API (seul le HASH est stocké)."""
+    conn = _connect(db_path)
+    try:
+        conn.execute(
+            "INSERT OR REPLACE INTO api_keys (key_hash, label, username, enabled, "
+            "created_at) VALUES (?, ?, ?, 1, ?)",
+            (key_hash, label, username, _now_str()))
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def get_api_key(key_hash, db_path=DEFAULT_DB_PATH):
+    """Renvoie la clé API par son hash (usage interne : vérification). None si absente."""
+    conn = _connect(db_path)
+    try:
+        r = conn.execute("SELECT * FROM api_keys WHERE key_hash = ?", (key_hash,)).fetchone()
+        return dict(r) if r else None
+    finally:
+        conn.close()
+
+
+def list_api_keys(db_path=DEFAULT_DB_PATH):
+    """Liste des clés API (hash inclus comme identifiant de suppression, jamais la clé)."""
+    conn = _connect(db_path)
+    try:
+        rows = conn.execute(
+            "SELECT key_hash, label, username, enabled, created_at, last_used_at "
+            "FROM api_keys ORDER BY created_at DESC"
+        ).fetchall()
+        out = []
+        for r in rows:
+            d = dict(r)
+            d["enabled"] = bool(d["enabled"])
+            out.append(d)
+        return out
+    finally:
+        conn.close()
+
+
+def touch_api_key(key_hash, db_path=DEFAULT_DB_PATH):
+    """Horodate la dernière utilisation d'une clé API."""
+    conn = _connect(db_path)
+    try:
+        conn.execute("UPDATE api_keys SET last_used_at = ? WHERE key_hash = ?",
+                     (_now_str(), key_hash))
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def delete_api_key(key_hash, db_path=DEFAULT_DB_PATH):
+    """Révoque/supprime une clé API."""
+    conn = _connect(db_path)
+    try:
+        cur = conn.execute("DELETE FROM api_keys WHERE key_hash = ?", (key_hash,))
+        conn.commit()
+        return cur.rowcount > 0
     finally:
         conn.close()
 

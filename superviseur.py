@@ -36,6 +36,7 @@ service et son API restent actifs.
 
 import os
 import sys
+import ssl
 import json
 import time
 import socket
@@ -48,8 +49,14 @@ import concurrent.futures
 
 # --- Librairies internes (dossier lib/) ------------------------------------
 from lib import superviseur_db as db
-from lib import webserver, log
+from lib import webserver, log, auth, database, security, authroutes, tls
 from lib.scheduler import RecurringTask
+
+# quickmail (racine du projet) : envoi des mots de passe générés par e-mail.
+try:
+    import quickmail
+except Exception:   # pragma: no cover - environnement minimal
+    quickmail = None
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 # Pages statiques : embarquées dans sys._MEIPASS en build gelé (cf. --add-data
@@ -75,6 +82,27 @@ _HDRS = {"User-Agent": "Superviseur/1.0", "Accept": "application/json"}
 _poll_summary = {"sites": 0, "ok": 0, "ko": 0}
 _poll_summary_lock = threading.Lock()
 
+# État de sécurité du superviseur (renseigné par main()).
+SUP_HTTPS = False
+SUP_AUTH_ENABLED = False
+SUP_BASE_URL = None
+SESSION_CLEANUP_TASK_NAME = "session-cleanup"
+SESSION_CLEANUP_TIME = datetime.time(3, 20)
+
+# Jetons de session par site distant (échange login/mdp -> jeton, réutilisé 24 h).
+# {site_id: {"token": str, "expires": monotonic}}. Les clés API sont utilisées
+# directement comme Bearer (pas d'échange).
+_site_tokens = {}
+_site_tokens_lock = threading.Lock()
+
+
+def _truthy(v):
+    if isinstance(v, bool):
+        return v
+    if v is None:
+        return False
+    return str(v).strip().lower() in ("1", "true", "yes", "on")
+
 
 # ==========================================================================
 # OUTILS
@@ -84,8 +112,35 @@ def _now():
 
 
 def _base_url(site):
-    """URL de base d'un site supervisé (http://host:port)."""
-    return f"http://{site['host']}:{site['port']}"
+    """URL de base d'un site supervisé (http(s)://host:port selon le schéma)."""
+    scheme = site.get("scheme") or "http"
+    return f"{scheme}://{site['host']}:{site['port']}"
+
+
+def _mask_site(s):
+    """Copie d'un site SANS les secrets (pour les réponses API).
+
+    Le mot de passe et la clé API ne sont jamais renvoyés ; on expose seulement
+    des drapeaux `has_password` / `has_api_key`. `username` (non secret) est gardé.
+    """
+    s = dict(s)
+    pwd = s.pop("password", None)
+    key = s.pop("api_key", None)
+    s["has_password"] = bool(pwd)
+    s["has_api_key"] = bool(key)
+    return s
+
+
+def _ssl_ctx_for(site):
+    """Contexte SSL pour joindre un site : non-vérifiant si https + verify_ssl=0."""
+    if (site or {}).get("scheme") != "https":
+        return None
+    if site.get("verify_ssl"):
+        return None                       # vérification standard (contexte défaut)
+    ctx = ssl.create_default_context()
+    ctx.check_hostname = False
+    ctx.verify_mode = ssl.CERT_NONE
+    return ctx
 
 
 def _err_str(exc):
@@ -102,29 +157,104 @@ def _err_str(exc):
     return str(exc) or exc.__class__.__name__
 
 
-def _http_get_raw(base, path, timeout):
+def _post_json(base, path, payload, timeout, ctx=None):
+    """POST JSON vers `base + path`. Renvoie (status, body_bytes). Ne lève pas sur
+    statut HTTP (renvoie le code), lève seulement sur erreur réseau/délai."""
+    data = json.dumps(payload).encode("utf-8")
+    headers = dict(_HDRS)
+    headers["Content-Type"] = "application/json"
+    req = urllib.request.Request(base + path, data=data, headers=headers, method="POST")
+    try:
+        with urllib.request.urlopen(req, timeout=timeout, context=ctx) as r:
+            return r.getcode(), r.read()
+    except urllib.error.HTTPError as e:
+        return e.code, (e.read() if hasattr(e, "read") else b"")
+
+
+def _site_bearer(site, timeout, force=False):
+    """Jeton Bearer pour joindre un site.
+
+    - clé API : utilisée directement (Bearer statique, révocable côté site) ;
+    - sinon username/mdp : échangés UNE fois contre un jeton de session (24 h),
+      mis en cache et réutilisés ; `force=True` refait l'échange (self-healing 401).
+    None si le site n'a aucun identifiant (site sans authentification).
+    """
+    if not site:
+        return None
+    key = site.get("api_key")
+    if key:
+        return key
+    user, pwd = site.get("username"), site.get("password")
+    if not (user and pwd):
+        return None
+    sid = site["id"]
+    if not force:
+        with _site_tokens_lock:
+            cached = _site_tokens.get(sid)
+            if cached and cached["expires"] > time.monotonic():
+                return cached["token"]
+    base = _base_url(site)
+    ctx = _ssl_ctx_for(site)
+    try:
+        code, body = _post_json(base, "/api/auth/login",
+                                {"username": user, "password": pwd}, timeout, ctx)
+        if code == 200:
+            tok = (json.loads(body.decode("utf-8")) or {}).get("token")
+            if tok:
+                with _site_tokens_lock:
+                    # Rafraîchi bien avant l'expiration réelle (fenêtre 24 h glissante).
+                    _site_tokens[sid] = {"token": tok,
+                                         "expires": time.monotonic() + 23 * 3600}
+                return tok
+        else:
+            log.log(f"[superviseur] Login refusé sur {site.get('name')} (HTTP {code}).")
+    except Exception as e:
+        log.log(f"[superviseur] Login échoué sur {site.get('name')} : {_err_str(e)}")
+    return None
+
+
+def _http_get_raw(base, path, timeout, site=None):
     """GET brut vers `base + path`. Renvoie (status, content_type, body_bytes).
 
-    Une réponse non-2xx AVEC corps (ex. 404 JSON du site) est renvoyée telle
-    quelle (pour le proxy). Une erreur de connexion/délai lève l'exception.
+    Joint le jeton Bearer du site (clé API ou session) et gère le TLS selon le
+    schéma/verify_ssl. Une réponse non-2xx AVEC corps (ex. 404 JSON du site) est
+    renvoyée telle quelle (pour le proxy). Sur 401 avec un compte (username/mdp),
+    ré-authentifie une fois et rejoue (self-healing, comme le client Mirth).
+    Une erreur de connexion/délai lève l'exception.
     """
     url = base + path
-    req = urllib.request.Request(url, headers=_HDRS)
-    try:
-        with urllib.request.urlopen(req, timeout=timeout) as r:
-            body = r.read()
+    ctx = _ssl_ctx_for(site) if site else None
+
+    def _do(bearer):
+        headers = dict(_HDRS)
+        if bearer:
+            headers["Authorization"] = "Bearer " + bearer
+        req = urllib.request.Request(url, headers=headers)
+        with urllib.request.urlopen(req, timeout=timeout, context=ctx) as r:
             ctype = r.headers.get("Content-Type", "application/json; charset=utf-8")
-            return r.getcode(), ctype, body
+            return r.getcode(), ctype, r.read()
+
+    bearer = _site_bearer(site, timeout) if site else None
+    try:
+        return _do(bearer)
     except urllib.error.HTTPError as e:
+        # Session expirée (compte username/mdp) : ré-auth une fois et on rejoue.
+        if e.code == 401 and site and not site.get("api_key") and site.get("username"):
+            fresh = _site_bearer(site, timeout, force=True)
+            if fresh:
+                try:
+                    return _do(fresh)
+                except urllib.error.HTTPError as e2:
+                    e = e2
         body = e.read() if hasattr(e, "read") else b""
         ctype = (e.headers.get("Content-Type") if e.headers else None) \
             or "application/json; charset=utf-8"
         return e.code, ctype, body
 
 
-def _fetch_json(base, path, timeout):
+def _fetch_json(base, path, timeout, site=None):
     """GET JSON vers `base + path`. Lève sur erreur réseau ou statut >= 400."""
-    code, _ctype, body = _http_get_raw(base, path, timeout)
+    code, _ctype, body = _http_get_raw(base, path, timeout, site=site)
     if code >= 400:
         raise RuntimeError(f"HTTP {code}")
     return json.loads(body.decode("utf-8"))
@@ -155,7 +285,7 @@ def poll_site(site, timeout=None):
 
     # 1. Joignabilité + identité (obligatoire ; un échec ici => site KO).
     try:
-        info = _fetch_json(base, "/api/hostinfo", timeout)
+        info = _fetch_json(base, "/api/hostinfo", timeout, site=site)
         st["ok"] = True
         st["hostname"] = info.get("hostname")
         st["os"] = info.get("os")
@@ -166,7 +296,7 @@ def poll_site(site, timeout=None):
 
     # 2. Vue d'ensemble Mirth (priorité de la supervision).
     try:
-        ov = _fetch_json(base, "/api/mirth/api", timeout)
+        ov = _fetch_json(base, "/api/mirth/api", timeout, site=site)
         st["mirth_reachable"] = bool(ov.get("reachable", True))
         st["mirth_version"] = ov.get("version")
         st["channel_count"] = ov.get("channel_count")
@@ -192,7 +322,7 @@ def poll_site(site, timeout=None):
 
     # 3. Dernier relevé système de la machine hôte (CPU / mémoire).
     try:
-        sl = _fetch_json(base, "/api/history/latest?tag=system", timeout)
+        sl = _fetch_json(base, "/api/history/latest?tag=system", timeout, site=site)
         latest = (sl or {}).get("latest") or {}
         st["cpu_percent"] = latest.get("cpu_percent")
         st["mem_percent"] = latest.get("mem_percent")
@@ -201,7 +331,7 @@ def poll_site(site, timeout=None):
 
     # 4. Dernier relevé du processus Mirth (CPU / mémoire du process).
     try:
-        ml = _fetch_json(base, "/api/mirth/history/latest", timeout)
+        ml = _fetch_json(base, "/api/mirth/history/latest", timeout, site=site)
         latest = (ml or {}).get("latest") or {}
         st["proc_cpu_percent"] = latest.get("cpu_percent")
         st["proc_mem_percent"] = latest.get("mem_percent")
@@ -293,43 +423,57 @@ def _require_site(req):
 
 
 def api_sites_list(req):
-    """Liste de configuration des sites (sans leur état)."""
-    return {"sites": db.list_sites()}
+    """Liste de configuration des sites (sans leur état, secrets masqués)."""
+    return {"sites": [_mask_site(s) for s in db.list_sites()]}
 
 
 def api_sites_summary(req):
     """Sites + dernier instantané d'état (alimente le tableau de bord)."""
-    return {"now": _now(), "sites": db.get_summary()}
+    return {"now": _now(), "sites": [_mask_site(s) for s in db.get_summary()]}
 
 
 def api_sites_add(req):
-    """Ajoute un site. Corps JSON : {name, host, port}."""
+    """Ajoute un site. Corps JSON : {name, host, port, scheme, verify_ssl,
+    api_key | username+password}."""
     body = req.json()
     try:
-        site = db.add_site(body.get("name"), body.get("host"), body.get("port"))
+        site = db.add_site(
+            body.get("name"), body.get("host"), body.get("port"),
+            scheme=body.get("scheme", "http"),
+            verify_ssl=_truthy(body.get("verify_ssl")),
+            api_key=body.get("api_key"), username=body.get("username"),
+            password=body.get("password"))
     except ValueError as e:
         return (400, {"ok": False, "error": str(e)})
     log.log(f"[superviseur] Site ajouté : {site['name']} "
-            f"({site['host']}:{site['port']}).")
-    return (201, {"ok": True, "site": site})
+            f"({site.get('scheme')}://{site['host']}:{site['port']}).")
+    return (201, {"ok": True, "site": _mask_site(site)})
 
 
 def api_sites_update(req):
-    """Met à jour un site. Corps JSON : tout sous-ensemble de
-    {name, host, port, enabled}."""
+    """Met à jour un site. Corps JSON : tout sous-ensemble de {name, host, port,
+    enabled, scheme, verify_ssl, api_key, username, password} (secrets : "" efface)."""
     site = _require_site(req)
     if isinstance(site, tuple):
         return site
     body = req.json()
+    vs = body.get("verify_ssl")
     try:
         updated = db.update_site(
             site["id"],
             name=body.get("name"), host=body.get("host"),
             port=body.get("port"), enabled=body.get("enabled"),
+            scheme=body.get("scheme"),
+            verify_ssl=(None if vs is None else _truthy(vs)),
+            api_key=body.get("api_key"), username=body.get("username"),
+            password=body.get("password"),
         )
     except ValueError as e:
         return (400, {"ok": False, "error": str(e)})
-    return {"ok": True, "site": updated}
+    # Un changement d'identifiants invalide le jeton de session mémorisé du site.
+    with _site_tokens_lock:
+        _site_tokens.pop(site["id"], None)
+    return {"ok": True, "site": _mask_site(updated)}
 
 
 def api_sites_toggle(req):
@@ -340,7 +484,7 @@ def api_sites_toggle(req):
     updated = db.set_enabled(site["id"], not site["enabled"])
     state = "activé" if updated["enabled"] else "désactivé"
     log.log(f"[superviseur] Site {state} : {updated['name']}.")
-    return {"ok": True, "site": updated}
+    return {"ok": True, "site": _mask_site(updated)}
 
 
 def api_sites_delete(req):
@@ -363,7 +507,7 @@ def api_sites_poll(req):
         db.upsert_status(site["id"], st)
     except Exception as e:
         log.log(f"[superviseur] Erreur d'enregistrement (poll manuel) : {e}")
-    return {"ok": True, "site": site, "status": db.get_status(site["id"])}
+    return {"ok": True, "site": _mask_site(site), "status": db.get_status(site["id"])}
 
 
 def api_sites_proxy(req):
@@ -381,7 +525,7 @@ def api_sites_proxy(req):
         return (400, {"error": "Chemin proxy invalide (doit commencer par /api/)."})
     base = _base_url(site)
     try:
-        code, ctype, body = _http_get_raw(base, path, _PROXY_TIMEOUT)
+        code, ctype, body = _http_get_raw(base, path, _PROXY_TIMEOUT, site=site)
     except Exception as e:
         return (502, {"error": f"Site injoignable : {_err_str(e)}"})
     return webserver.Response(body, status=code, content_type=ctype)
@@ -404,10 +548,67 @@ def make_api_status(tasks, started_at):
 
 
 # ==========================================================================
+# AUTHENTIFICATION DE L'INTERFACE DU SUPERVISEUR
+# ==========================================================================
+def _send_account_email(username, email, password, renew=False):
+    """Envoie le mot de passe généré au titulaire d'un compte du superviseur."""
+    if quickmail is None:
+        return False
+    base = SUP_BASE_URL or ""
+    action = "renouvelé" if renew else "créé"
+    subject = "Superviseur Mirth_checker — vos identifiants"
+    message = (
+        f"Bonjour,\n\n"
+        f"Un compte d'accès au logiciel « Superviseur » (supervision à distance des "
+        f"serveurs Mirth_checker) a été {action} pour vous.\n\n"
+        f"  Identifiant : {username}\n"
+        f"  Mot de passe : {password}\n"
+        + (f"  Adresse du superviseur : {base}\n" if base else "")
+        + "\nCe mot de passe est personnel et ne pourra pas vous être communiqué de "
+        "nouveau : conservez-le en lieu sûr.\n"
+    )
+    esc = lambda s: str(s).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+    link = (f'<p>Adresse du superviseur : <a href="{esc(base)}">{esc(base)}</a></p>'
+            if base else "")
+    html = (
+        f"<p>Bonjour,</p><p>Un compte d'accès au logiciel « <b>Superviseur</b> » a été "
+        f"{action} pour vous.</p><ul><li>Identifiant : <b>{esc(username)}</b></li>"
+        f"<li>Mot de passe : <code>{esc(password)}</code></li></ul>{link}"
+        f"<p style='color:#888'>Ce mot de passe est personnel et ne pourra pas vous être "
+        f"communiqué de nouveau.</p>"
+    )
+    try:
+        return bool(quickmail.sendmail(subject, message, email, html=html))
+    except Exception as e:
+        log.log(f"[superviseur] Échec d'envoi du mot de passe à {email} : {e}")
+        return False
+
+
+def _build_auth_routes():
+    return authroutes.make_auth_routes(
+        db.DEFAULT_DB_PATH,
+        is_https=lambda: SUP_HTTPS,
+        base_url=lambda: SUP_BASE_URL or "",
+        mailer=_send_account_email,
+        log_fn=log.log,
+        auth_enabled=lambda: SUP_AUTH_ENABLED,
+    )
+
+
+def scheduled_session_cleanup():
+    """Purge quotidienne des sessions web expirées du superviseur."""
+    database.purge_expired_sessions(db_path=db.DEFAULT_DB_PATH)
+
+
+# ==========================================================================
 # ROUTAGE
 # ==========================================================================
 def build_router(tasks, started_at):
     router = webserver.Router(static_dir=WEB_DIR, index_route="/")
+
+    # Authentification + comptes + clés (mêmes routes que checker_service, sur
+    # superviseur.db) — protège la propre interface du superviseur.
+    _build_auth_routes().register(router)
 
     # Sites : configuration + état
     router.get("/api/sites", api_sites_list)
@@ -423,6 +624,38 @@ def build_router(tasks, started_at):
     # Statut du superviseur lui-même
     router.get("/api/status", make_api_status(tasks, started_at))
     return router
+
+
+def _run_account_cli(args):
+    """--add-admin / --list-users / --del-user sur la base du superviseur."""
+    db.init_db()
+    if args.list_users:
+        users = database.list_users(db_path=db.DEFAULT_DB_PATH)
+        if not users:
+            print("Aucun compte enregistré.")
+        else:
+            for u in users:
+                print(f"  {u['username']:<20} {u['email']:<28} {u['role']:<12} "
+                      f"{'actif' if u['enabled'] else 'désactivé'}")
+        return
+    if args.del_user:
+        ok = database.delete_user(args.del_user, db_path=db.DEFAULT_DB_PATH)
+        print(f"Compte '{args.del_user}' {'supprimé' if ok else 'introuvable'}.")
+        return
+    if args.add_admin:
+        username = args.add_admin.strip()
+        email = (args.email or "").strip()
+        password = auth.generate_password()
+        if not database.create_user(username, email or "-", auth.hash_password(password),
+                                    role="admin", db_path=db.DEFAULT_DB_PATH):
+            print(f"Erreur : le compte '{username}' existe déjà.")
+            return
+        sent = _send_account_email(username, email, password) if email else False
+        if sent:
+            print(f"Compte administrateur '{username}' créé. Mot de passe envoyé à {email}.")
+        else:
+            print(f"Compte administrateur '{username}' créé.")
+            print(f"  Mot de passe (à transmettre de façon sûre) : {password}")
 
 
 # ==========================================================================
@@ -445,7 +678,31 @@ def main():
                         dest="no_output",
                         help="N'affiche RIEN dans la console (lancement en "
                              "arrière-plan). Le service et son API restent actifs.")
+
+    sec = parser.add_argument_group("Sécurité")
+    sec.add_argument("--https", choices=["auto", "on", "off"], default=None,
+                     help="HTTPS de l'interface superviseur : auto/on/off.")
+    sec.add_argument("--cert", default=None, help="Certificat TLS (PEM).")
+    sec.add_argument("--key", default=None, help="Clé privée TLS (PEM).")
+    sec.add_argument("--allow-ips", dest="allow_ips", default=None,
+                     help="Liste blanche d'IP/CIDR (vide => tout autorisé).")
+    sec.add_argument("--auth", choices=["on", "off"], default=None,
+                     help="Authentification par comptes/session de l'interface.")
+
+    acc = parser.add_argument_group("Comptes (CLI)")
+    acc.add_argument("--add-admin", dest="add_admin", metavar="IDENTIFIANT", default=None,
+                     help="Crée un compte administrateur (mdp généré, e-mail avec --email).")
+    acc.add_argument("--email", default=None, help="E-mail du compte (avec --add-admin).")
+    acc.add_argument("--list-users", dest="list_users", action="store_true",
+                     help="Affiche la liste des comptes et quitte.")
+    acc.add_argument("--del-user", dest="del_user", metavar="IDENTIFIANT", default=None,
+                     help="Supprime un compte et quitte.")
+
     args = parser.parse_args()
+
+    if args.add_admin or args.list_users or args.del_user:
+        _run_account_cli(args)
+        return
 
     if args.no_output:
         log.set_quiet(True)
@@ -453,9 +710,51 @@ def main():
     global _POLL_TIMEOUT
     _POLL_TIMEOUT = args.timeout
 
+    # --- Sécurité : configuration + TLS + politique d'accès --------------------
+    global SUP_HTTPS, SUP_AUTH_ENABLED, SUP_BASE_URL
+    sec_cfg = security.load_security_config(args)
+    auth.set_session_ttl_hours(sec_cfg["SESSION_TTL_H"])
+    SUP_AUTH_ENABLED = sec_cfg["AUTH_ENABLED"]
+    _sec_log = []
+
+    tls_context = None
+    if security.https_enabled_for_host(sec_cfg["HTTPS_MODE"], args.host):
+        cert_dir = os.path.dirname(db.DEFAULT_DB_PATH)
+        cert = sec_cfg["HTTPS_CERT"] or os.path.join(cert_dir, "superviseur_cert.pem")
+        key = sec_cfg["HTTPS_KEY"] or os.path.join(cert_dir, "superviseur_key.pem")
+        provided = bool(sec_cfg["HTTPS_CERT"] and sec_cfg["HTTPS_KEY"])
+        try:
+            if not provided:
+                tls.ensure_self_signed_cert(cert, key, hostname=socket.gethostname() or None)
+            tls_context = tls.build_ssl_context(cert, key)
+            _sec_log.append(f"[superviseur] HTTPS activé (certificat : {cert}).")
+        except Exception as e:
+            if sec_cfg["HTTPS_MODE"] == "on":
+                print(f"[superviseur] HTTPS demandé mais impossible à activer : {e}",
+                      file=sys.stderr)
+                sys.exit(1)
+            _sec_log.append(f"[superviseur] HTTPS 'auto' indisponible ({e}) — repli en HTTP.")
+    SUP_HTTPS = tls_context is not None
+
+    security_policy = security.SecurityPolicy(
+        networks=security.parse_networks(sec_cfg["ALLOWED_IPS"]),
+        tls_context=tls_context,
+        auth_enabled=sec_cfg["AUTH_ENABLED"],
+        db_path=db.DEFAULT_DB_PATH,
+    )
+    scheme = "https" if SUP_HTTPS else "http"
+    # URL de base pour les e-mails : IP routable (pas le nom d'hôte, faute de DNS
+    # local) ; derrière un NAT, poser SUPERVISEUR_BASE_URL.
+    SUP_BASE_URL = (os.environ.get("SUPERVISEUR_BASE_URL") or "").strip().rstrip("/") \
+        or f"{scheme}://{security.primary_ip(args.host)}:{args.port}"
+
     # 1. Tâche programmée (créée avant le tableau de bord pour qu'il l'affiche
     #    dès la 1re frame).
     tasks = [RecurringTask(args.interval, scheduled_poll, name=POLL_TASK_NAME)]
+    if SUP_AUTH_ENABLED:
+        tasks.append(RecurringTask(24 * 3600, scheduled_session_cleanup,
+                                   name=SESSION_CLEANUP_TASK_NAME,
+                                   daily_at=SESSION_CLEANUP_TIME))
 
     # 2. Tableau de bord console (rich) ; repli texte si rich absent / hors terminal.
     log.start_dashboard(tasks, title="Superviseur — relève des sites",
@@ -467,6 +766,17 @@ def main():
     log.log(f"[superviseur] Base SQLite : {db.DEFAULT_DB_PATH}")
     n_sites = len(db.list_sites())
     log.log(f"[superviseur] {n_sites} site(s) configuré(s).")
+
+    # 3bis. État de sécurité (différé depuis le chargement de la config).
+    for line in _sec_log:
+        log.log(line)
+    log.log(
+        f"[superviseur] Sécurité : HTTPS={'oui' if SUP_HTTPS else 'non'}, "
+        f"authentification={'oui' if SUP_AUTH_ENABLED else 'non'}, "
+        f"filtre IP={len(security_policy.networks) or 'désactivé'}.")
+    if SUP_AUTH_ENABLED and database.count_users(db_path=db.DEFAULT_DB_PATH) == 0:
+        log.log("[superviseur] Aucun compte : accès toléré depuis localhost pour créer "
+                "le 1er administrateur (UI ou --add-admin).")
 
     # 4. Démarrage de la tâche
     status_line = make_status_line(tasks)
@@ -480,7 +790,8 @@ def main():
     started_at = _now()
     router = build_router(tasks, started_at)
     try:
-        httpd = webserver.serve(router, host=args.host, port=args.port)
+        httpd = webserver.serve(router, host=args.host, port=args.port,
+                                security=security_policy)
     except OSError as e:
         for task in tasks:
             task.stop()
@@ -490,7 +801,7 @@ def main():
         sys.exit(1)
 
     display_host = "localhost" if args.host in ("0.0.0.0", "") else args.host
-    url = f"http://{display_host}:{args.port}/"
+    url = f"{scheme}://{display_host}:{args.port}/"
     log.log(f"[superviseur] Serveur web : {url}")
     log.log(f"[superviseur] Tableau de bord : {url}dashboard.html")
     log.log(f"[superviseur] Administration : {url}admin.html")

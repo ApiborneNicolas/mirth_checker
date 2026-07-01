@@ -27,6 +27,8 @@ import sqlite3
 import datetime
 import threading
 
+from . import database
+
 # Emplacement de la base : à côté du script en exécution normale ; à côté de
 # l'exécutable en build gelé (PyInstaller --onefile, où __file__ pointe dans le
 # dossier temporaire _MEIxxxx effacé à la sortie). Même logique que
@@ -73,6 +75,22 @@ def init_db(db_path=DEFAULT_DB_PATH):
             )
             """
         )
+        # Migration : colonnes de sécurité du lien superviseur -> site distant.
+        #   scheme     : 'http' | 'https' (protocole d'accès au site) ;
+        #   verify_ssl : 0 = accepter le certificat auto-signé du site (défaut) ;
+        #   api_key    : clé API (Bearer statique) ; OU
+        #   username/password : compte du site (échangé une fois contre un jeton).
+        scols = [r["name"] for r in conn.execute("PRAGMA table_info(sites)").fetchall()]
+        if "scheme" not in scols:
+            conn.execute("ALTER TABLE sites ADD COLUMN scheme TEXT NOT NULL DEFAULT 'http'")
+        if "verify_ssl" not in scols:
+            conn.execute("ALTER TABLE sites ADD COLUMN verify_ssl INTEGER NOT NULL DEFAULT 0")
+        if "api_key" not in scols:
+            conn.execute("ALTER TABLE sites ADD COLUMN api_key TEXT")
+        if "username" not in scols:
+            conn.execute("ALTER TABLE sites ADD COLUMN username TEXT")
+        if "password" not in scols:
+            conn.execute("ALTER TABLE sites ADD COLUMN password TEXT")
         # Instantané courant : une seule ligne par site (PRIMARY KEY = site_id),
         # remplacée à chaque relève. ON DELETE CASCADE supprime l'état d'un site
         # supprimé.
@@ -104,6 +122,14 @@ def init_db(db_path=DEFAULT_DB_PATH):
         conn.commit()
     finally:
         conn.close()
+    # Tables d'authentification (mêmes que checker : comptes/sessions/clés) pour
+    # protéger la PROPRE interface du superviseur avec le même mécanisme.
+    database.init_auth_tables(db_path)
+
+
+def _norm_scheme(value, default="http"):
+    v = (str(value).strip().lower() if value is not None else "")
+    return v if v in ("http", "https") else default
 
 
 # ==========================================================================
@@ -112,6 +138,8 @@ def init_db(db_path=DEFAULT_DB_PATH):
 def _site_dict(row):
     d = dict(row)
     d["enabled"] = bool(d.get("enabled"))
+    if "verify_ssl" in d:
+        d["verify_ssl"] = bool(d.get("verify_ssl"))
     return d
 
 
@@ -139,7 +167,8 @@ def get_site(site_id, db_path=DEFAULT_DB_PATH):
         conn.close()
 
 
-def add_site(name, host, port, enabled=True, db_path=DEFAULT_DB_PATH):
+def add_site(name, host, port, enabled=True, scheme="http", verify_ssl=False,
+             api_key=None, username=None, password=None, db_path=DEFAULT_DB_PATH):
     """Ajoute un site. Lève `ValueError` si (host, port) existe déjà ou si les
     champs sont invalides. Renvoie le site créé."""
     name = (name or "").strip()
@@ -155,13 +184,20 @@ def add_site(name, host, port, enabled=True, db_path=DEFAULT_DB_PATH):
     if not (1 <= port <= 65535):
         raise ValueError("Le port doit être compris entre 1 et 65535.")
 
+    scheme = _norm_scheme(scheme)
+    api_key = (api_key or "").strip() or None
+    username = (username or "").strip() or None
+    password = (password or "") or None
+
     conn = _connect(db_path)
     try:
         try:
             cur = conn.execute(
-                "INSERT INTO sites (name, host, port, enabled, created_at) "
-                "VALUES (?, ?, ?, ?, ?)",
-                (name, host, port, 1 if enabled else 0, _now()),
+                "INSERT INTO sites (name, host, port, enabled, created_at, scheme, "
+                "verify_ssl, api_key, username, password) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (name, host, port, 1 if enabled else 0, _now(), scheme,
+                 1 if verify_ssl else 0, api_key, username, password),
             )
         except sqlite3.IntegrityError:
             raise ValueError(f"Un site existe déjà pour {host}:{port}.")
@@ -174,9 +210,13 @@ def add_site(name, host, port, enabled=True, db_path=DEFAULT_DB_PATH):
 
 
 def update_site(site_id, name=None, host=None, port=None, enabled=None,
-                db_path=DEFAULT_DB_PATH):
+                scheme=None, verify_ssl=None, api_key=None, username=None,
+                password=None, db_path=DEFAULT_DB_PATH):
     """Met à jour les champs fournis (non None) d'un site. Renvoie le site mis à
-    jour, ou None si l'id est inconnu. Lève `ValueError` sur conflit/invalidité."""
+    jour, ou None si l'id est inconnu. Lève `ValueError` sur conflit/invalidité.
+
+    Pour les secrets (api_key/username/password) : None = inchangé ; chaîne vide
+    = effacement (valeur mise à NULL)."""
     site = get_site(site_id, db_path=db_path)
     if not site:
         return None
@@ -185,6 +225,12 @@ def update_site(site_id, name=None, host=None, port=None, enabled=None,
     new_host = site["host"] if host is None else (host or "").strip()
     new_port = site["port"] if port is None else port
     new_enabled = site["enabled"] if enabled is None else bool(enabled)
+    new_scheme = site.get("scheme", "http") if scheme is None else _norm_scheme(scheme)
+    new_verify = site.get("verify_ssl", False) if verify_ssl is None else bool(verify_ssl)
+    # Secrets : None = inchangé ; "" = effacer.
+    new_key = site.get("api_key") if api_key is None else ((api_key or "").strip() or None)
+    new_user = site.get("username") if username is None else ((username or "").strip() or None)
+    new_pwd = site.get("password") if password is None else ((password or "") or None)
 
     if not new_name:
         raise ValueError("Le nom du site est obligatoire.")
@@ -201,8 +247,11 @@ def update_site(site_id, name=None, host=None, port=None, enabled=None,
     try:
         try:
             conn.execute(
-                "UPDATE sites SET name = ?, host = ?, port = ?, enabled = ? WHERE id = ?",
-                (new_name, new_host, new_port, 1 if new_enabled else 0, site_id),
+                "UPDATE sites SET name = ?, host = ?, port = ?, enabled = ?, "
+                "scheme = ?, verify_ssl = ?, api_key = ?, username = ?, password = ? "
+                "WHERE id = ?",
+                (new_name, new_host, new_port, 1 if new_enabled else 0, new_scheme,
+                 1 if new_verify else 0, new_key, new_user, new_pwd, site_id),
             )
         except sqlite3.IntegrityError:
             raise ValueError(f"Un autre site existe déjà pour {new_host}:{new_port}.")

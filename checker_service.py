@@ -32,6 +32,7 @@ rendu de façon ÉVÉNEMENTIELLE : redessiné uniquement quand son contenu chang
 import os
 import re
 import sys
+import json
 import math
 import argparse
 import datetime
@@ -42,7 +43,7 @@ import concurrent.futures
 from tabulate import tabulate
 
 # --- Import des librairies internes (dossier lib/) -------------------------
-from lib import database, webserver, log
+from lib import database, webserver, log, auth, security, tls
 from lib.scheduler import RecurringTask, start_staggered
 
 # --- Import des scripts existants en tant que librairies -------------------
@@ -79,6 +80,13 @@ RETENTION_PURGE_TIME = datetime.time(3, 0)
 # d'environnement CHECKER_BASE_URL si fournie, sinon nom d'hôte + port. None tant
 # que le service n'a pas démarré (les e-mails omettent alors les liens).
 SERVICE_BASE_URL = None
+
+# État de sécurité du service, renseigné par main() (utilisé par les handlers
+# d'authentification pour poser le drapeau Secure du cookie et pour ouvrir les
+# routes d'admin quand l'authentification est globalement désactivée).
+SERVICE_HTTPS = False
+SERVICE_AUTH_ENABLED = False
+SESSION_CLEANUP_TIME = datetime.time(3, 15)   # purge quotidienne des sessions expirées
 
 
 # ==========================================================================
@@ -1009,6 +1017,21 @@ def scheduled_purge():
     if deleted:
         log.log(f"[checker_service] Rétention {RETENTION_DAYS} j : "
                 f"{deleted} ligne(s) ancienne(s) purgée(s).")
+
+
+SESSION_CLEANUP_TASK_NAME = "session-cleanup"
+
+
+def scheduled_session_cleanup():
+    """Tâche programmée : purge les sessions web expirées (une fois/jour).
+
+    Les sessions sont validées à chaque requête (fenêtre glissante) ; ce ménage
+    ne fait que supprimer les lignes déjà expirées pour ne pas laisser grossir la
+    table `web_sessions`.
+    """
+    n = database.purge_expired_sessions()
+    _task_summaries[SESSION_CLEANUP_TASK_NAME] = (
+        f"{n} expirée(s)" if n else "à jour", "" if n else "dim")
 
 
 def _detect_device_transitions(devices, ts):
@@ -2478,9 +2501,271 @@ def api_devices_history_at(req):
     return database.get_device_history_at(ts)
 
 
+# ==========================================================================
+# AUTHENTIFICATION, COMPTES & CLÉS API
+# ==========================================================================
+def _session_cookie_header(token, clear=False):
+    """En-tête Set-Cookie du jeton de session (HttpOnly, SameSite=Strict)."""
+    parts = [f"{security.SESSION_COOKIE}={token if not clear else ''}",
+             "HttpOnly", "SameSite=Strict", "Path=/"]
+    if SERVICE_HTTPS:
+        parts.append("Secure")
+    if clear:
+        parts.append("Max-Age=0")
+    return "; ".join(parts)
+
+
+def _json_response(payload, status=200, headers=None):
+    body = json.dumps(payload, ensure_ascii=False, default=str).encode("utf-8")
+    return webserver.Response(body, status=status, headers=headers or {},
+                              content_type="application/json; charset=utf-8")
+
+
+def _request_token(req):
+    """Jeton porté par la requête : cookie de session, sinon en-tête Bearer."""
+    tok = security._read_cookie(req.headers.get("Cookie"), security.SESSION_COOKIE)
+    if tok:
+        return tok
+    authz = req.headers.get("Authorization", "") or ""
+    if authz.startswith("Bearer "):
+        return authz[7:].strip()
+    return None
+
+
+def _require_admin(req):
+    """None si l'appelant est admin (ou auth globalement désactivée), sinon 403."""
+    if not SERVICE_AUTH_ENABLED:
+        return None
+    u = req.user
+    if not u or u.get("role") != "admin":
+        return (403, {"error": "forbidden", "detail": "Réservé aux administrateurs."})
+    return None
+
+
+def _html_escape(s):
+    return (str(s).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;"))
+
+
+def _send_account_email(username, email, password, renew=False):
+    """Envoie le mot de passe généré au titulaire du compte. Renvoie True si envoyé.
+
+    Le mot de passe n'est JAMAIS affiché à l'admin : ce mail est le seul vecteur.
+    """
+    base = SERVICE_BASE_URL or ""
+    action = "renouvelé" if renew else "créé"
+    subject = "Mirth_checker — vos identifiants de connexion"
+    message = (
+        f"Bonjour,\n\n"
+        f"Un compte d'accès à la supervision Mirth_checker a été {action} pour vous.\n\n"
+        f"  Identifiant : {username}\n"
+        f"  Mot de passe : {password}\n"
+        + (f"  Adresse du service : {base}\n" if base else "")
+        + "\nPour la supervision à distance de vos serveurs, utilisez le logiciel "
+        "« Superviseur ».\n\n"
+        "Ce mot de passe est personnel et ne pourra pas vous être communiqué de "
+        "nouveau : conservez-le en lieu sûr (un renouvellement en générera un autre).\n"
+    )
+    link = (f'<p>Adresse du service : <a href="{_html_escape(base)}">{_html_escape(base)}</a></p>'
+            if base else "")
+    html = (
+        f"<p>Bonjour,</p>"
+        f"<p>Un compte d'accès à la supervision <b>Mirth_checker</b> a été {action} pour vous.</p>"
+        f"<ul><li>Identifiant : <b>{_html_escape(username)}</b></li>"
+        f"<li>Mot de passe : <code>{_html_escape(password)}</code></li></ul>"
+        f"{link}"
+        f"<p>Pour la supervision à distance de vos serveurs, utilisez le logiciel "
+        f"« <b>Superviseur</b> ».</p>"
+        f"<p style='color:#888'>Ce mot de passe est personnel et ne pourra pas vous être "
+        f"communiqué de nouveau : conservez-le en lieu sûr (un renouvellement en générera "
+        f"un autre).</p>"
+    )
+    try:
+        return bool(quickmail.sendmail(subject, message, email, html=html))
+    except Exception as e:
+        log.log(f"[checker_service] Échec d'envoi du mot de passe à {email} : {e}")
+        return False
+
+
+def api_auth_login(req):
+    """POST /api/auth/login {username, password} -> jeton de session + cookie."""
+    data = req.json()
+    username = (data.get("username") or "").strip()
+    password = data.get("password") or ""
+    if not username or not password:
+        return _json_response({"ok": False, "error": "Identifiant et mot de passe requis."},
+                              status=400)
+    user = database.get_user(username)
+    if not user or not user.get("enabled") or not auth.verify_password(password, user.get("password_hash")):
+        return _json_response({"ok": False, "error": "Identifiants invalides."}, status=401)
+    token, expires = auth.create_session(username, ip=req.client_ip)
+    database.touch_user_login(username)
+    log.log(f"[checker_service] Connexion : {username} ({req.client_ip}).")
+    return _json_response(
+        {"ok": True, "username": username, "role": user.get("role") or "technicien",
+         "expires_at": expires, "token": token},
+        headers={"Set-Cookie": _session_cookie_header(token)})
+
+
+def api_auth_logout(req):
+    """POST /api/auth/logout -> révoque la session courante et efface le cookie."""
+    tok = _request_token(req)
+    if tok:
+        auth.revoke_session(tok)
+    return _json_response({"ok": True},
+                          headers={"Set-Cookie": _session_cookie_header("", clear=True)})
+
+
+def api_auth_whoami(req):
+    """GET /api/auth/whoami -> identité de la session courante (route protégée)."""
+    u = req.user or {}
+    return {"authenticated": bool(u), "username": u.get("username"),
+            "role": u.get("role"), "expires_at": u.get("expires_at"),
+            "bootstrap": bool(u.get("bootstrap"))}
+
+
+def api_auth_token(req):
+    """POST /api/auth/token -> frappe un jeton Bearer lié au compte courant (page API).
+
+    Comme la base ne stocke que le hash du jeton de navigation, on ne peut pas le
+    « relire » : on émet un nouveau jeton de session (même TTL 24 h) pour l'usage API.
+    """
+    u = req.user or {}
+    username = u.get("username")
+    if not username or not database.get_user(username):
+        return (400, {"ok": False,
+                      "error": "Jeton disponible uniquement pour un compte réel connecté."})
+    token, expires = auth.create_session(username, ip=req.client_ip)
+    return {"ok": True, "token": token, "expires_at": expires, "username": username}
+
+
+# --- Comptes (admin) -------------------------------------------------------
+def api_users_list(req):
+    """GET /api/users -> liste des comptes (admin). Jamais de hash/mot de passe."""
+    guard = _require_admin(req)
+    if guard:
+        return guard
+    return {"users": database.list_users()}
+
+
+def api_users_create(req):
+    """POST /api/users {username, email, role} -> crée + envoie le mdp par e-mail."""
+    guard = _require_admin(req)
+    if guard:
+        return guard
+    data = req.json()
+    username = (data.get("username") or "").strip()
+    email = (data.get("email") or "").strip()
+    role = (data.get("role") or "technicien").strip()
+    if role not in ("admin", "technicien"):
+        role = "technicien"
+    if not username or not email:
+        return (400, {"ok": False, "error": "Identifiant et e-mail requis."})
+    password = auth.generate_password()
+    if not database.create_user(username, email, auth.hash_password(password), role=role):
+        return (409, {"ok": False, "error": "Cet identifiant existe déjà."})
+    mailed = _send_account_email(username, email, password, renew=False)
+    log.log(f"[checker_service] Compte créé : {username} ({role}) — e-mail {'envoyé' if mailed else 'NON envoyé'} à {email}.")
+    return {"ok": True, "mailed": mailed, "username": username}
+
+
+def api_users_renew(req):
+    """POST /api/users/{name}/renew -> régénère le mdp + e-mail + coupe les sessions."""
+    guard = _require_admin(req)
+    if guard:
+        return guard
+    username = req.params.get("name")
+    user = database.get_user(username)
+    if not user:
+        return (404, {"ok": False, "error": "Compte introuvable."})
+    password = auth.generate_password()
+    database.set_password(username, auth.hash_password(password))
+    database.delete_user_sessions(username)   # force la reconnexion
+    mailed = _send_account_email(username, user.get("email"), password, renew=True)
+    log.log(f"[checker_service] Mot de passe renouvelé : {username} — e-mail {'envoyé' if mailed else 'NON envoyé'}.")
+    return {"ok": True, "mailed": mailed, "username": username}
+
+
+def api_users_enable(req):
+    guard = _require_admin(req)
+    if guard:
+        return guard
+    username = req.params.get("name")
+    if not database.set_user_enabled(username, True):
+        return (404, {"ok": False, "error": "Compte introuvable."})
+    return {"ok": True, "username": username, "enabled": True}
+
+
+def api_users_disable(req):
+    guard = _require_admin(req)
+    if guard:
+        return guard
+    username = req.params.get("name")
+    if not database.set_user_enabled(username, False):
+        return (404, {"ok": False, "error": "Compte introuvable."})
+    return {"ok": True, "username": username, "enabled": False}
+
+
+def api_users_delete(req):
+    guard = _require_admin(req)
+    if guard:
+        return guard
+    username = req.params.get("name")
+    if not database.delete_user(username):
+        return (404, {"ok": False, "error": "Compte introuvable."})
+    log.log(f"[checker_service] Compte supprimé : {username}.")
+    return {"ok": True, "username": username}
+
+
+# --- Clés API (admin) : clients machine (superviseur) ----------------------
+def api_keys_list(req):
+    guard = _require_admin(req)
+    if guard:
+        return guard
+    return {"keys": database.list_api_keys()}
+
+
+def api_keys_create(req):
+    """POST /api/keys {label, username?} -> crée une clé (renvoyée UNE seule fois)."""
+    guard = _require_admin(req)
+    if guard:
+        return guard
+    data = req.json()
+    label = (data.get("label") or "").strip() or None
+    username = (data.get("username") or "").strip() or None
+    raw = auth.new_api_key()
+    database.insert_api_key(auth.token_fingerprint(raw), label=label, username=username)
+    log.log(f"[checker_service] Clé API créée : {label or '(sans label)'}.")
+    return {"ok": True, "key": raw, "key_id": auth.token_fingerprint(raw), "label": label}
+
+
+def api_keys_delete(req):
+    guard = _require_admin(req)
+    if guard:
+        return guard
+    key_id = req.params.get("id")
+    if not database.delete_api_key(key_id):
+        return (404, {"ok": False, "error": "Clé introuvable."})
+    return {"ok": True}
+
+
 def build_router(tasks, started_at):
     router = webserver.Router(static_dir=WEB_DIR, index_route="/",
                               json_transform=_round_floats)
+
+    # Authentification, comptes & clés API (sécurité)
+    router.post("/api/auth/login", api_auth_login)
+    router.post("/api/auth/logout", api_auth_logout)
+    router.get("/api/auth/whoami", api_auth_whoami)
+    router.post("/api/auth/token", api_auth_token)
+    router.get("/api/users", api_users_list)
+    router.post("/api/users", api_users_create)
+    router.post("/api/users/{name}/renew", api_users_renew)
+    router.post("/api/users/{name}/enable", api_users_enable)
+    router.post("/api/users/{name}/disable", api_users_disable)
+    router.post("/api/users/{name}/delete", api_users_delete)
+    router.get("/api/keys", api_keys_list)
+    router.post("/api/keys", api_keys_create)
+    router.post("/api/keys/{id}/delete", api_keys_delete)
 
     # API système
     router.get("/api/system", api_system)
@@ -2557,6 +2842,53 @@ def build_router(tasks, started_at):
 
 
 # ==========================================================================
+# GESTION DE COMPTES EN LIGNE DE COMMANDE (bootstrap sans UI)
+# ==========================================================================
+def _run_account_cli(args):
+    """Exécute --add-admin / --list-users / --del-user puis rend la main.
+
+    Sert à amorcer le premier compte administrateur (y compris sur l'exe) sans
+    passer par l'interface web.
+    """
+    database.init_db()
+
+    if args.list_users:
+        users = database.list_users()
+        if not users:
+            print("Aucun compte enregistré.")
+        else:
+            rows = [[u["username"], u["email"], u["role"],
+                     "oui" if u["enabled"] else "non",
+                     u.get("last_login_at") or "-"] for u in users]
+            print(tabulate(rows, headers=["Identifiant", "E-mail", "Rôle",
+                                          "Activé", "Dernière connexion"]))
+        return
+
+    if args.del_user:
+        ok = database.delete_user(args.del_user)
+        print(f"Compte '{args.del_user}' {'supprimé' if ok else 'introuvable'}.")
+        return
+
+    if args.add_admin:
+        username = args.add_admin.strip()
+        email = (args.email or "").strip()
+        password = auth.generate_password()
+        if not database.create_user(username, email or "-",
+                                    auth.hash_password(password), role="admin"):
+            print(f"Erreur : le compte '{username}' existe déjà.")
+            return
+        sent = _send_account_email(username, email, password, renew=False) if email else False
+        if sent:
+            print(f"Compte administrateur '{username}' créé. "
+                  f"Mot de passe envoyé à {email}.")
+        else:
+            print(f"Compte administrateur '{username}' créé.")
+            print(f"  Mot de passe (à transmettre de façon sûre) : {password}")
+            if email:
+                print("  (Envoi e-mail impossible — SMTP non configuré ?)")
+
+
+# ==========================================================================
 # MAIN
 # ==========================================================================
 def main():
@@ -2588,7 +2920,40 @@ def main():
                         help="Identifiant de connexion à l'API Mirth")
     parser.add_argument("--mirth-password", default=None,
                         help="Mot de passe de connexion à l'API Mirth")
+
+    # --- Sécurité (HTTPS / filtre IP / authentification) -------------------
+    sec = parser.add_argument_group("Sécurité")
+    sec.add_argument("--https", choices=["auto", "on", "off"], default=None,
+                     help="HTTPS : 'auto' (activé hors localhost), 'on', 'off'. "
+                          "Défaut : .mirth_config.py/HTTPS_MODE (auto).")
+    sec.add_argument("--cert", default=None,
+                     help="Chemin du certificat TLS (PEM). Vide => auto-signé généré.")
+    sec.add_argument("--key", default=None, help="Chemin de la clé privée TLS (PEM).")
+    sec.add_argument("--allow-ips", dest="allow_ips", default=None,
+                     help="Liste blanche d'IP/CIDR séparées par des virgules "
+                          "(vide => tout autorisé). Ex: 127.0.0.1,192.168.0.0/16")
+    sec.add_argument("--auth", choices=["on", "off"], default=None,
+                     help="Authentification par comptes/session. "
+                          "Défaut : .mirth_config.py/AUTH_ENABLED (on).")
+
+    # --- Gestion de comptes en ligne de commande (bootstrap, sans UI) ------
+    acc = parser.add_argument_group("Comptes (CLI)")
+    acc.add_argument("--add-admin", dest="add_admin", metavar="IDENTIFIANT", default=None,
+                     help="Crée un compte administrateur (mot de passe généré, envoyé "
+                          "par e-mail — requiert --email — ou affiché ici si SMTP absent).")
+    acc.add_argument("--email", default=None, help="E-mail du compte (avec --add-admin).")
+    acc.add_argument("--list-users", dest="list_users", action="store_true",
+                     help="Affiche la liste des comptes et quitte.")
+    acc.add_argument("--del-user", dest="del_user", metavar="IDENTIFIANT", default=None,
+                     help="Supprime un compte et quitte.")
+
     args = parser.parse_args()
+
+    # Opérations de gestion de comptes en ligne de commande : elles initialisent la
+    # base, exécutent l'action puis quittent (pas de démarrage du serveur).
+    if args.add_admin or args.list_users or args.del_user:
+        _run_account_cli(args)
+        return
 
     # Mode silencieux (--no_output) : coupe toute sortie console (tableau de bord
     # rich ET logs). Posé AVANT le premier log / le démarrage du tableau de bord
@@ -2601,15 +2966,57 @@ def main():
     global RETENTION_DAYS
     RETENTION_DAYS = args.retention_days
 
-    # URL publique du service pour les liens profonds des e-mails d'alerte :
-    # CHECKER_BASE_URL si fournie, sinon nom d'hôte de la machine + port d'écoute.
+    # --- Sécurité : configuration + TLS + politique d'accès --------------------
+    # Chargée tôt (avant le tableau de bord) pour connaître le schéma http/https et
+    # décider de la tâche de purge des sessions. Les messages sont différés dans
+    # `_sec_log` puis journalisés une fois le dashboard démarré.
+    global SERVICE_HTTPS, SERVICE_AUTH_ENABLED
+    sec_cfg = security.load_security_config(args)
+    auth.set_session_ttl_hours(sec_cfg["SESSION_TTL_H"])
+    SERVICE_AUTH_ENABLED = sec_cfg["AUTH_ENABLED"]
+    _sec_log = []
+
+    tls_context = None
+    if security.https_enabled_for_host(sec_cfg["HTTPS_MODE"], args.host):
+        cert_dir = os.path.dirname(database.DEFAULT_DB_PATH)
+        cert = sec_cfg["HTTPS_CERT"] or os.path.join(cert_dir, "checker_cert.pem")
+        key = sec_cfg["HTTPS_KEY"] or os.path.join(cert_dir, "checker_key.pem")
+        provided = bool(sec_cfg["HTTPS_CERT"] and sec_cfg["HTTPS_KEY"])
+        try:
+            if not provided:
+                tls.ensure_self_signed_cert(
+                    cert, key, hostname=system_state.get_hostname() or None)
+            tls_context = tls.build_ssl_context(cert, key)
+            _sec_log.append(f"[checker_service] HTTPS activé (certificat : {cert}).")
+        except Exception as e:
+            if sec_cfg["HTTPS_MODE"] == "on":
+                # HTTPS explicitement exigé : échec bloquant, pas de repli silencieux.
+                print(f"[checker_service] HTTPS demandé mais impossible à activer : {e}",
+                      file=sys.stderr)
+                sys.exit(1)
+            _sec_log.append(
+                f"[checker_service] HTTPS 'auto' indisponible ({e}) — repli en HTTP.")
+            tls_context = None
+    SERVICE_HTTPS = tls_context is not None
+
+    security_policy = security.SecurityPolicy(
+        networks=security.parse_networks(sec_cfg["ALLOWED_IPS"]),
+        tls_context=tls_context,
+        auth_enabled=sec_cfg["AUTH_ENABLED"],
+        db_path=database.DEFAULT_DB_PATH,
+    )
+    scheme = "https" if SERVICE_HTTPS else "http"
+
+    # URL publique du service pour les liens profonds des e-mails (alertes,
+    # identifiants de compte) : CHECKER_BASE_URL si fournie, sinon l'IP routable
+    # de la machine + port d'écoute (on privilégie l'IP au nom d'hôte car il n'y a
+    # pas forcément d'entrée DNS locale ; derrière un NAT, poser CHECKER_BASE_URL).
     global SERVICE_BASE_URL
     env_url = (os.environ.get("CHECKER_BASE_URL") or "").strip().rstrip("/")
     if env_url:
         SERVICE_BASE_URL = env_url
     else:
-        host = system_state.get_hostname() or "localhost"
-        SERVICE_BASE_URL = f"http://{host}:{args.port}"
+        SERVICE_BASE_URL = f"{scheme}://{security.primary_ip(args.host)}:{args.port}"
 
     # Identifiants Mirth fournis en ligne de commande : injectés dans
     # l'environnement, source la plus prioritaire pour mirth_api.get_config().
@@ -2638,6 +3045,11 @@ def main():
         tasks.append(RecurringTask(RETENTION_PURGE_INTERVAL, scheduled_purge,
                                    name=RETENTION_TASK_NAME,
                                    daily_at=RETENTION_PURGE_TIME))
+    # Purge quotidienne des sessions web expirées (seulement si l'auth est active).
+    if SERVICE_AUTH_ENABLED:
+        tasks.append(RecurringTask(RETENTION_PURGE_INTERVAL, scheduled_session_cleanup,
+                                   name=SESSION_CLEANUP_TASK_NAME,
+                                   daily_at=SESSION_CLEANUP_TIME))
 
     # 2. Tableau de bord console (rich) : tâches du planificateur en haut, journal
     #    défilant en bas. Démarré tôt pour capturer les logs d'initialisation. Si
@@ -2649,6 +3061,17 @@ def main():
     # 3. Initialisation de la base
     database.init_db()
     log.log(f"[checker_service] Base SQLite : {database.DEFAULT_DB_PATH}")
+
+    # 3ter. Journalise l'état de sécurité (différé depuis le chargement de la config).
+    for line in _sec_log:
+        log.log(line)
+    log.log(
+        f"[checker_service] Sécurité : HTTPS={'oui' if SERVICE_HTTPS else 'non'}, "
+        f"authentification={'oui' if SERVICE_AUTH_ENABLED else 'non'}, "
+        f"filtre IP={len(security_policy.networks) or 'désactivé'}.")
+    if SERVICE_AUTH_ENABLED and database.count_users() == 0:
+        log.log("[checker_service] Aucun compte : accès toléré depuis localhost pour "
+                "créer le 1er administrateur (UI ou --add-admin).")
 
     # 3bis. Marqueurs d'interruption (arrêt logiciel / boot système) avant reprise
     mark_startup_events()
@@ -2674,7 +3097,8 @@ def main():
     started_at = system_state.get_now_datetime()
     router = build_router(tasks, started_at)
     try:
-        httpd = webserver.serve(router, host=args.host, port=args.port)
+        httpd = webserver.serve(router, host=args.host, port=args.port,
+                                security=security_policy)
     except OSError as e:
         # Port déjà pris : très probablement une autre instance de checker_service
         # tourne déjà sur ce port. On refuse de démarrer plutôt que d'alimenter la
@@ -2687,7 +3111,7 @@ def main():
         sys.exit(1)
 
     display_host = "localhost" if args.host in ("0.0.0.0", "") else args.host
-    url = f"http://{display_host}:{args.port}/"
+    url = f"{scheme}://{display_host}:{args.port}/"
     log.log(f"[checker_service] Serveur web : {url}")
     log.log(f"[checker_service] Page statistiques : {url}statistiques.html")
     log.log("[checker_service] Ctrl+C pour arrêter.")

@@ -1,0 +1,216 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Superviseur — Comptes</title>
+    <script>
+        (function(){try{var t=localStorage.getItem("mc-theme");if(!t)t=matchMedia("(prefers-color-scheme: light)").matches?"light":"dark";document.documentElement.setAttribute("data-theme",t);}catch(e){document.documentElement.setAttribute("data-theme","dark");}})();
+    </script>
+    <!-- Authentification (wrapper fetch + injection nav) : AVANT tout autre script. -->
+    <script src="auth.js"></script>
+    <link rel="stylesheet" href="theme.css">
+    <script src="theme.js" defer></script>
+    <style>
+        .intro { font-size: 13px; color: var(--muted); line-height: 1.6; margin-bottom: 4px; }
+        .accounts-table td { vertical-align: middle; }
+        .accounts-table .col-actions { display: flex; gap: 6px; flex-wrap: wrap; }
+        .create-row { display: flex; gap: 10px; flex-wrap: wrap; align-items: flex-end; margin-top: 6px; }
+        .create-row .field { display: flex; flex-direction: column; gap: 4px; }
+        .create-row label { font-size: 12px; color: var(--muted); }
+        .create-row input, .create-row select {
+            padding: 8px 10px; border-radius: 8px; border: 1px solid var(--border);
+            background: var(--panel-2); color: var(--text); font-size: 14px; min-width: 180px; }
+        .muted-cell { color: var(--muted); }
+    </style>
+</head>
+<body>
+    <header class="topbar">
+        <div class="brand"><span class="logo">👤</span><h1>Comptes</h1></div>
+        <nav>
+            <a href="dashboard.html">📡 Tableau de bord</a>
+            <a href="admin.html">⚙️ Administration</a>
+        </nav>
+        <div class="actions">
+            <button class="theme-toggle" type="button" title="Basculer clair / sombre" aria-label="Basculer le thème">
+                <span class="icon-moon">🌙</span><span class="icon-sun">☀️</span>
+            </button>
+        </div>
+    </header>
+
+    <div class="panel">
+        <h2>Comptes du superviseur <span id="badge-state" class="badge b-muted">—</span></h2>
+        <p class="intro">
+            Créez un compte pour un opérateur (identifiant + e-mail). Un <b>mot de passe
+            aléatoire</b> est généré et <b>envoyé par e-mail</b> : il n'est jamais affiché
+            ici. « Renouveler » en génère un nouveau et coupe les sessions en cours.
+        </p>
+        <table class="accounts-table">
+            <thead>
+                <tr><th>Identifiant</th><th>E-mail</th><th>Rôle</th><th>État</th>
+                    <th>Dernière connexion</th><th>Dernière activité</th><th>Actions</th></tr>
+            </thead>
+            <tbody id="accounts-body"><tr><td colspan="7" class="muted-cell">Chargement…</td></tr></tbody>
+        </table>
+
+        <div style="margin-top:16px">
+            <button class="primary" id="open-user-modal">➕ Créer un compte</button>
+        </div>
+    </div>
+
+    <div class="panel">
+        <h2>Journal des opérations</h2>
+        <div class="console" id="console"><span class="log-info">En attente d'une opération…</span></div>
+    </div>
+
+    <!-- ============== MODALE : CRÉER UN COMPTE ============== -->
+    <div class="modal-overlay" id="user-modal">
+        <div class="modal" role="dialog" aria-modal="true" aria-labelledby="user-modal-title">
+            <div class="modal-head">
+                <h2 id="user-modal-title">Créer un compte</h2>
+                <button class="modal-close" data-close="user-modal" title="Fermer">✕</button>
+            </div>
+            <div class="modal-body">
+                <div class="field"><label for="new-username">Identifiant</label>
+                    <input type="text" id="new-username" placeholder="operateur1" autocomplete="off"></div>
+                <div class="field" style="margin-top:10px"><label for="new-email">E-mail</label>
+                    <input type="text" id="new-email" placeholder="operateur1@ets.fr" autocomplete="off"></div>
+                <div class="field" style="margin-top:10px"><label for="new-role">Rôle</label>
+                    <select id="new-role">
+                        <option value="technicien">Opérateur</option>
+                        <option value="admin">Administrateur</option>
+                    </select></div>
+                <div class="hint" style="margin-top:12px">Un mot de passe aléatoire est généré
+                    et envoyé par e-mail au titulaire — jamais affiché ici.</div>
+                <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:18px">
+                    <button data-close="user-modal">Annuler</button>
+                    <button class="primary" id="btn-create">➕ Créer &amp; envoyer</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <footer>
+        <span id="foot-status"><span class="dot pulse" style="background:var(--ok)"></span>Connecté</span>
+        — Gestion des comptes du superviseur
+    </footer>
+
+<script>
+const API = "";
+const $ = id => document.getElementById(id);
+function log(msg, kind = "info") {
+    const c = $("console");
+    if (c.dataset.fresh !== "1") { c.innerHTML = ""; c.dataset.fresh = "1"; }
+    const time = new Date().toLocaleTimeString("fr-FR");
+    const line = document.createElement("div");
+    line.className = "log-line";
+    line.innerHTML = `<span class="log-time">${time}</span> <span class="log-${kind}"></span>`;
+    line.querySelector("span.log-" + kind).textContent = msg;
+    c.appendChild(line); c.scrollTop = c.scrollHeight;
+}
+function busy(on) {
+    document.querySelectorAll("button").forEach(b => {
+        if (b.classList.contains("theme-toggle") || b.dataset.mc === "logout") return;
+        if (on) { if (!b.disabled) { b.dataset.busied = "1"; b.disabled = true; } }
+        else if (b.dataset.busied === "1") { b.disabled = false; delete b.dataset.busied; }
+    });
+}
+async function postJson(url, body) {
+    const r = await fetch(API + url, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body || {}) });
+    const data = await r.json().catch(() => ({}));
+    if (!r.ok) throw new Error(data.error || ("HTTP " + r.status));
+    return data;
+}
+function esc(s) { const d = document.createElement("div"); d.textContent = s == null ? "" : s; return d.innerHTML; }
+
+async function loadUsers() {
+    try {
+        const r = await fetch(API + "/api/users");
+        if (!r.ok) throw new Error("HTTP " + r.status);
+        const d = await r.json();
+        renderUsers(d.users || []);
+        $("badge-state").className = "badge b-ok";
+        $("badge-state").textContent = (d.users || []).length + " compte(s)";
+    } catch (e) {
+        $("badge-state").className = "badge b-err";
+        $("badge-state").textContent = "Erreur";
+        log("✗ Chargement des comptes : " + e.message, "err");
+    }
+}
+function mkBtn(label, fn, cls) {
+    const b = document.createElement("button");
+    b.className = "small" + (cls ? " " + cls : ""); b.textContent = label;
+    b.addEventListener("click", fn); return b;
+}
+function renderUsers(users) {
+    const tb = $("accounts-body"); tb.innerHTML = "";
+    if (!users.length) { tb.innerHTML = '<tr><td colspan="7" class="muted-cell">Aucun compte.</td></tr>'; return; }
+    users.forEach(u => {
+        const tr = document.createElement("tr");
+        const roleBadge = u.role === "admin" ? '<span class="badge b-warn">admin</span>' : '<span class="badge b-muted">opérateur</span>';
+        const stateBadge = u.enabled ? '<span class="badge b-ok">actif</span>' : '<span class="badge b-err">désactivé</span>';
+        tr.innerHTML =
+            `<td><b>${esc(u.username)}</b></td><td>${esc(u.email)}</td><td>${roleBadge}</td><td>${stateBadge}</td>` +
+            `<td class="muted-cell">${esc(u.last_login_at) || "—"}</td><td class="muted-cell">${esc(u.last_seen_at) || "—"}</td>`;
+        const td = document.createElement("td"); td.className = "col-actions";
+        td.appendChild(mkBtn("✉ Renouveler", () => renewUser(u.username)));
+        td.appendChild(mkBtn(u.enabled ? "⏸ Désactiver" : "▶ Activer", () => toggleUser(u.username, !u.enabled)));
+        td.appendChild(mkBtn("🗑 Supprimer", () => deleteUser(u.username), "danger"));
+        tr.appendChild(td); tb.appendChild(tr);
+    });
+}
+async function createUser() {
+    const username = $("new-username").value.trim(), email = $("new-email").value.trim(), role = $("new-role").value;
+    if (!username || !email) { log("✗ Identifiant et e-mail requis.", "err"); return; }
+    busy(true);
+    try {
+        const d = await postJson("/api/users", { username, email, role });
+        if (d.mailed) log(`✓ Compte « ${username} » créé — mot de passe envoyé à ${email}.`, "ok");
+        else log(`⚠ Compte « ${username} » créé mais l'e-mail n'a PAS pu être envoyé (SMTP ?).`, "err");
+        $("new-username").value = ""; $("new-email").value = ""; await loadUsers();
+        closeModal("user-modal");
+    } catch (e) { log("✗ Création : " + e.message, "err"); } finally { busy(false); }
+}
+async function renewUser(username) {
+    busy(true);
+    try {
+        const d = await postJson(`/api/users/${encodeURIComponent(username)}/renew`, {});
+        if (d.mailed) log(`✓ Nouveau mot de passe envoyé à « ${username} ».`, "ok");
+        else log(`⚠ Mot de passe renouvelé mais e-mail NON envoyé pour « ${username} ».`, "err");
+        await loadUsers();
+    } catch (e) { log("✗ Renouvellement : " + e.message, "err"); } finally { busy(false); }
+}
+async function toggleUser(username, enable) {
+    busy(true);
+    try {
+        await postJson(`/api/users/${encodeURIComponent(username)}/${enable ? "enable" : "disable"}`, {});
+        log(`✓ Compte « ${username} » ${enable ? "activé" : "désactivé"}.`, "ok"); await loadUsers();
+    } catch (e) { log("✗ " + e.message, "err"); } finally { busy(false); }
+}
+async function deleteUser(username) {
+    if (!confirm(`Supprimer définitivement le compte « ${username} » ?`)) return;
+    busy(true);
+    try {
+        await postJson(`/api/users/${encodeURIComponent(username)}/delete`, {});
+        log(`✓ Compte « ${username} » supprimé.`, "ok"); await loadUsers();
+    } catch (e) { log("✗ Suppression : " + e.message, "err"); } finally { busy(false); }
+}
+function openModal(id) { document.getElementById(id).classList.add("open"); }
+function closeModal(id) { document.getElementById(id).classList.remove("open"); }
+$("open-user-modal").addEventListener("click", () => {
+    $("new-username").value = ""; $("new-email").value = ""; $("new-role").value = "technicien";
+    openModal("user-modal"); $("new-username").focus();
+});
+document.querySelectorAll("[data-close]").forEach(b =>
+    b.addEventListener("click", () => closeModal(b.dataset.close)));
+(function () {
+    const ov = document.getElementById("user-modal");
+    ov.addEventListener("click", e => { if (e.target === ov) closeModal("user-modal"); });
+    document.addEventListener("keydown", e => { if (e.key === "Escape") closeModal("user-modal"); });
+})();
+
+$("btn-create").addEventListener("click", createUser);
+loadUsers();
+</script>
+</body>
+</html>

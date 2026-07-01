@@ -8,6 +8,8 @@
     <script>
         (function(){try{var t=localStorage.getItem("mc-theme");if(!t)t=matchMedia("(prefers-color-scheme: light)").matches?"light":"dark";document.documentElement.setAttribute("data-theme",t);}catch(e){document.documentElement.setAttribute("data-theme","dark");}})();
     </script>
+    <!-- Authentification (wrapper fetch + injection nav) : AVANT tout autre script. -->
+    <script src="auth.js"></script>
     <link rel="stylesheet" href="theme.css">
     <script src="theme.js" defer></script>
     <style>
@@ -47,61 +49,113 @@
         </div>
     </header>
 
-    <div class="grid">
-        <!-- ============== FORMULAIRE D'AJOUT / MODIFICATION ============== -->
-        <div>
-            <div class="panel">
+    <!-- ============== TABLEAU DES SITES ============== -->
+    <div class="panel">
+        <div style="display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap;margin-bottom:6px">
+            <h2 style="margin:0">Sites configurés <span id="badge-count" class="badge b-muted">—</span></h2>
+            <button class="primary" id="open-site-modal">＋ Ajouter un site</button>
+        </div>
+        <table>
+            <thead>
+                <tr>
+                    <th>Nom</th>
+                    <th>Hôte</th>
+                    <th class="num">Port</th>
+                    <th>État</th>
+                    <th class="actions-cell">Actions</th>
+                </tr>
+            </thead>
+            <tbody id="sites-body">
+                <tr class="empty-row"><td colspan="5">Chargement…</td></tr>
+            </tbody>
+        </table>
+        <div class="hint">
+            « Désactiver » suspend la relève d'un site sans le supprimer ;
+            il n'apparaît plus dans la supervision active.
+        </div>
+    </div>
+
+    <div class="panel">
+        <h2>Journal des opérations</h2>
+        <div class="console" id="console"><span class="log-info">En attente d'une opération…</span></div>
+    </div>
+
+    <!-- ============== MODALE : AJOUTER / MODIFIER UN SITE ============== -->
+    <div class="modal-overlay" id="site-modal">
+        <div class="modal" role="dialog" aria-modal="true" aria-labelledby="form-title">
+            <div class="modal-head">
                 <h2 id="form-title">Ajouter un site</h2>
+                <button class="modal-close" data-close="site-modal" title="Fermer">✕</button>
+            </div>
+            <div class="modal-body">
                 <div class="edit-banner" id="edit-banner"></div>
                 <div class="field">
                     <label for="f-name">Nom du site</label>
                     <input type="text" id="f-name" placeholder="ex. Serveur Hôpital A" autocomplete="off">
                 </div>
-                <div class="field">
-                    <label for="f-host">Hôte (IP ou nom)</label>
-                    <input type="text" id="f-host" placeholder="ex. 192.168.1.20" autocomplete="off">
+                <div style="display:flex;gap:12px;margin-top:10px">
+                    <div class="field" style="flex:2;min-width:0">
+                        <label for="f-host">Hôte (IP ou nom)</label>
+                        <input type="text" id="f-host" placeholder="ex. 192.168.1.20" autocomplete="off">
+                    </div>
+                    <div class="field" style="flex:1;min-width:0">
+                        <label for="f-port">Port</label>
+                        <input type="number" id="f-port" value="8800" min="1" max="65535">
+                    </div>
                 </div>
-                <div class="field">
-                    <label for="f-port">Port</label>
-                    <input type="number" id="f-port" value="8800" min="1" max="65535">
+                <div style="display:flex;gap:16px;align-items:flex-end;margin-top:10px">
+                    <div class="field" style="flex:0 0 140px">
+                        <label for="f-scheme">Protocole</label>
+                        <select id="f-scheme">
+                            <option value="http">HTTP</option>
+                            <option value="https">HTTPS</option>
+                        </select>
+                    </div>
+                    <label class="checks" style="display:flex;align-items:center;gap:6px;margin:0 0 9px;flex:1">
+                        <input type="checkbox" id="f-verify" style="width:auto;">
+                        Vérifier le certificat TLS (décoché = auto-signé)
+                    </label>
                 </div>
-                <div class="form-foot">
-                    <button id="btn-save" class="primary">＋ Ajouter</button>
-                    <button id="btn-cancel" style="display:none">Annuler</button>
+
+                <div class="field" style="margin-top:6px">
+                    <label>Méthode d'authentification <span style="color:var(--muted)">— clé API recommandée</span></label>
+                    <div style="display:flex;flex-wrap:wrap;gap:16px;margin-top:5px">
+                        <label class="checks" style="display:flex;align-items:center;gap:6px;margin:0">
+                            <input type="radio" name="authmethod" value="apikey" checked style="width:auto"> 🔑 Clé API
+                        </label>
+                        <label class="checks" style="display:flex;align-items:center;gap:6px;margin:0">
+                            <input type="radio" name="authmethod" value="userpass" style="width:auto"> 👤 Id / mot de passe
+                        </label>
+                        <label class="checks" style="display:flex;align-items:center;gap:6px;margin:0">
+                            <input type="radio" name="authmethod" value="none" style="width:auto"> Aucune
+                        </label>
+                    </div>
                 </div>
-                <div class="hint">
+
+                <div id="auth-apikey" style="margin-top:10px">
+                    <div class="field">
+                        <label for="f-apikey">Clé API du site</label>
+                        <input type="text" id="f-apikey" placeholder="(laisser vide = inchangé)" autocomplete="off">
+                    </div>
+                </div>
+                <div id="auth-userpass" style="margin-top:10px;display:none">
+                    <div class="field">
+                        <label for="f-username">Identifiant (compte du site)</label>
+                        <input type="text" id="f-username" placeholder="(compte du site distant)" autocomplete="off">
+                    </div>
+                    <div class="field" style="margin-top:8px">
+                        <label for="f-password">Mot de passe</label>
+                        <input type="password" id="f-password" placeholder="(laisser vide = inchangé)" autocomplete="new-password">
+                    </div>
+                </div>
+
+                <div class="hint" style="margin-top:12px">
                     Renseignez le port du service <code>checker_service</code> du site
                     (8800 par défaut). Le couple hôte + port doit être unique.
                 </div>
-            </div>
-
-            <div class="panel">
-                <h2>Journal des opérations</h2>
-                <div class="console" id="console"><span class="log-info">En attente d'une opération…</span></div>
-            </div>
-        </div>
-
-        <!-- ============== TABLEAU DES SITES ============== -->
-        <div>
-            <div class="panel">
-                <h2>Sites configurés <span id="badge-count" class="badge b-muted">—</span></h2>
-                <table>
-                    <thead>
-                        <tr>
-                            <th>Nom</th>
-                            <th>Hôte</th>
-                            <th class="num">Port</th>
-                            <th>État</th>
-                            <th class="actions-cell">Actions</th>
-                        </tr>
-                    </thead>
-                    <tbody id="sites-body">
-                        <tr class="empty-row"><td colspan="5">Chargement…</td></tr>
-                    </tbody>
-                </table>
-                <div class="hint">
-                    « Désactiver » suspend la relève d'un site sans le supprimer ;
-                    il n'apparaît plus dans la supervision active.
+                <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:16px">
+                    <button data-close="site-modal">Annuler</button>
+                    <button id="btn-save" class="primary">＋ Ajouter</button>
                 </div>
             </div>
         </div>
@@ -178,7 +232,7 @@ function render() {
     $("badge-count").className = "badge " + (sites.length ? "b-ok" : "b-muted");
     $("badge-count").textContent = sites.length + " site" + (sites.length > 1 ? "s" : "");
     if (!sites.length) {
-        tb.innerHTML = '<tr class="empty-row"><td colspan="5">Aucun site configuré. Ajoutez-en un à gauche.</td></tr>';
+        tb.innerHTML = '<tr class="empty-row"><td colspan="5">Aucun site configuré. Cliquez sur « ＋ Ajouter un site ».</td></tr>';
         return;
     }
     tb.innerHTML = "";
@@ -188,10 +242,14 @@ function render() {
         const stateBadge = s.enabled
             ? '<span class="badge b-ok">Actif</span>'
             : '<span class="badge b-muted">Désactivé</span>';
-        const url = `http://${s.host}:${s.port}/`;
+        const scheme = s.scheme || "http";
+        const url = `${scheme}://${s.host}:${s.port}/`;
+        const authTag = s.has_api_key ? ' <span class="badge b-ok" title="Clé API">🔑</span>'
+            : (s.has_password ? ' <span class="badge b-muted" title="Compte id/mdp">👤</span>' : "");
+        const httpsTag = scheme === "https" ? ' <span class="badge b-ok" title="HTTPS">🔒</span>' : "";
         tr.innerHTML =
             `<td><b>${esc(s.name)}</b></td>` +
-            `<td class="host-cell"><code>${esc(s.host)}</code></td>` +
+            `<td class="host-cell"><code>${esc(scheme)}://${esc(s.host)}</code>${httpsTag}${authTag}</td>` +
             `<td class="num">${esc(s.port)}</td>` +
             `<td>${stateBadge}</td>` +
             `<td class="actions-cell">` +
@@ -211,17 +269,42 @@ function render() {
 // ----------------------------------------------------------------------
 // Formulaire (ajout / modification)
 // ----------------------------------------------------------------------
+// Affiche le bloc de champs correspondant à la méthode d'auth sélectionnée.
+function updateAuthMethod() {
+    const m = (document.querySelector('input[name="authmethod"]:checked') || {}).value || "apikey";
+    $("auth-apikey").style.display = (m === "apikey") ? "" : "none";
+    $("auth-userpass").style.display = (m === "userpass") ? "" : "none";
+}
+function setAuthMethod(m) {
+    const r = document.querySelector(`input[name="authmethod"][value="${m}"]`);
+    if (r) r.checked = true;
+    updateAuthMethod();
+}
+
+function openModal(id) { document.getElementById(id).classList.add("open"); }
+function closeModal(id) { document.getElementById(id).classList.remove("open"); }
+
 function startEdit(s) {
     editId = s.id;
     $("form-title").textContent = "Modifier le site";
     $("f-name").value = s.name;
     $("f-host").value = s.host;
     $("f-port").value = s.port;
+    $("f-scheme").value = s.scheme || "http";
+    $("f-verify").checked = !!s.verify_ssl;
+    $("f-username").value = s.username || "";
+    // Secrets non renvoyés par l'API : champs vides (= inchangés). Placeholder informatif.
+    $("f-apikey").value = "";
+    $("f-apikey").placeholder = s.has_api_key ? "(définie — laisser vide = inchangée)" : "(aucune)";
+    $("f-password").value = "";
+    $("f-password").placeholder = s.has_password ? "(défini — laisser vide = inchangé)" : "(aucun)";
+    // Méthode déduite du site : clé API si présente, sinon compte, sinon aucune.
+    setAuthMethod(s.has_api_key ? "apikey" : ((s.has_password || s.username) ? "userpass" : "none"));
     $("btn-save").innerHTML = "💾 Enregistrer";
-    $("btn-cancel").style.display = "";
     const b = $("edit-banner");
     b.classList.add("show");
     b.textContent = `Modification de « ${s.name} ».`;
+    openModal("site-modal");
     $("f-name").focus();
 }
 
@@ -231,8 +314,13 @@ function resetForm() {
     $("f-name").value = "";
     $("f-host").value = "";
     $("f-port").value = "8800";
+    $("f-scheme").value = "http";
+    $("f-verify").checked = false;
+    $("f-apikey").value = ""; $("f-apikey").placeholder = "(laisser vide = inchangé)";
+    $("f-username").value = "";
+    $("f-password").value = ""; $("f-password").placeholder = "(laisser vide = inchangé)";
+    setAuthMethod("apikey");        // clé API par défaut (prioritaire)
     $("btn-save").innerHTML = "＋ Ajouter";
-    $("btn-cancel").style.display = "none";
     $("edit-banner").classList.remove("show");
 }
 
@@ -244,17 +332,40 @@ async function saveForm() {
     if (!host) { log("✗ L'hôte est obligatoire.", "err"); $("f-host").focus(); return; }
     if (isNaN(port) || port < 1 || port > 65535) { log("✗ Port invalide.", "err"); $("f-port").focus(); return; }
 
+    const payload = {
+        name, host, port,
+        scheme: $("f-scheme").value,
+        verify_ssl: $("f-verify").checked,
+    };
+    // Identifiants selon la méthode choisie. Les secrets « vides » restent
+    // inchangés en édition ; sélectionner une méthode efface les champs de l'autre.
+    const method = (document.querySelector('input[name="authmethod"]:checked') || {}).value || "apikey";
+    const apikey = $("f-apikey").value.trim();
+    const username = $("f-username").value.trim();
+    const pwd = $("f-password").value;
+    if (method === "apikey") {
+        if (apikey) payload.api_key = apikey;   // vide = inchangé
+        payload.username = ""; payload.password = "";
+    } else if (method === "userpass") {
+        payload.username = username;            // "" = efface
+        if (pwd) payload.password = pwd;        // vide = inchangé
+        payload.api_key = "";
+    } else {                                    // aucune
+        payload.api_key = ""; payload.username = ""; payload.password = "";
+    }
+
     $("btn-save").disabled = true;
     try {
         if (editId === null) {
-            const d = await postJson("/api/sites", { name, host, port });
-            log(`✓ Site ajouté : ${esc(d.site.name)} (${esc(d.site.host)}:${d.site.port}).`, "ok");
+            const d = await postJson("/api/sites", payload);
+            log(`✓ Site ajouté : ${esc(d.site.name)} (${esc(d.site.scheme)}://${esc(d.site.host)}:${d.site.port}).`, "ok");
         } else {
-            const d = await postJson(`/api/sites/${editId}`, { name, host, port });
+            const d = await postJson(`/api/sites/${editId}`, payload);
             log(`✓ Site modifié : ${esc(d.site.name)}.`, "ok");
         }
         resetForm();
         await load();
+        closeModal("site-modal");
     } catch (e) {
         log("✗ " + e.message, "err");
     } finally {
@@ -284,8 +395,19 @@ async function deleteSite(s) {
 // Branchements
 // ----------------------------------------------------------------------
 $("btn-save").addEventListener("click", saveForm);
-$("btn-cancel").addEventListener("click", resetForm);
 $("refresh").addEventListener("click", load);
+$("open-site-modal").addEventListener("click", () => {
+    resetForm(); openModal("site-modal"); $("f-name").focus();
+});
+document.querySelectorAll('input[name="authmethod"]').forEach(r =>
+    r.addEventListener("change", updateAuthMethod));
+document.querySelectorAll("[data-close]").forEach(b =>
+    b.addEventListener("click", () => closeModal(b.dataset.close)));
+(function () {
+    const ov = document.getElementById("site-modal");
+    ov.addEventListener("click", e => { if (e.target === ov) closeModal("site-modal"); });
+    document.addEventListener("keydown", e => { if (e.key === "Escape") closeModal("site-modal"); });
+})();
 ["f-name", "f-host", "f-port"].forEach(id =>
     $(id).addEventListener("keydown", e => { if (e.key === "Enter") saveForm(); }));
 

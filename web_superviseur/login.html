@@ -1,0 +1,80 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Superviseur — Connexion</title>
+    <script>
+        (function(){try{var t=localStorage.getItem("mc-theme");if(!t)t=matchMedia("(prefers-color-scheme: light)").matches?"light":"dark";document.documentElement.setAttribute("data-theme",t);}catch(e){document.documentElement.setAttribute("data-theme","dark");}})();
+    </script>
+    <link rel="stylesheet" href="theme.css">
+    <script src="theme.js" defer></script>
+    <style>
+        .login-wrap { min-height: 100vh; display: flex; align-items: center; justify-content: center; padding: 24px; }
+        .login-card { width: 100%; max-width: 380px; background: var(--panel); border: 1px solid var(--border);
+            border-radius: 14px; padding: 28px 26px; box-shadow: var(--shadow, 0 8px 30px rgba(0,0,0,.25)); }
+        .login-card .brand { display: flex; align-items: center; gap: 10px; margin-bottom: 4px; }
+        .login-card .logo { font-size: 26px; }
+        .login-card h1 { font-size: 20px; margin: 0; }
+        .login-card .sub { color: var(--muted); font-size: 13px; margin: 6px 0 20px; }
+        .login-card label { display: block; font-size: 12px; color: var(--muted); margin: 14px 0 5px; }
+        .login-card input[type=text], .login-card input[type=password] {
+            width: 100%; box-sizing: border-box; padding: 10px 12px; border-radius: 9px;
+            border: 1px solid var(--border); background: var(--panel-2); color: var(--text); font-size: 14px; }
+        .login-card input:focus-visible { outline: none; box-shadow: var(--ring); border-color: var(--accent); }
+        .login-card button.primary { width: 100%; margin-top: 20px; padding: 11px; font-size: 14px; }
+        .login-err { margin-top: 14px; padding: 9px 12px; border-radius: 9px; font-size: 13px;
+            background: color-mix(in srgb, var(--err) 16%, transparent); border: 1px solid var(--err);
+            color: var(--err); display: none; }
+        .login-foot { margin-top: 18px; font-size: 11px; color: var(--muted); text-align: center; }
+        .theme-toggle.floating { position: fixed; top: 16px; right: 16px; }
+    </style>
+</head>
+<body>
+    <button class="theme-toggle floating" type="button" title="Basculer clair / sombre" aria-label="Basculer le thème">
+        <span class="icon-moon">🌙</span><span class="icon-sun">☀️</span>
+    </button>
+    <div class="login-wrap">
+        <form class="login-card" id="login-form" autocomplete="on">
+            <div class="brand"><span class="logo">🛰️</span><h1>Superviseur</h1></div>
+            <div class="sub">Connexion à la supervision multi-sites.</div>
+
+            <label for="username">Identifiant</label>
+            <input type="text" id="username" name="username" autocomplete="username" autofocus required>
+
+            <label for="password">Mot de passe</label>
+            <input type="password" id="password" name="password" autocomplete="current-password" required>
+
+            <button type="submit" class="primary" id="btn-login">Se connecter</button>
+            <div class="login-err" id="err"></div>
+            <div class="login-foot">Utilisez les identifiants transmis par votre administrateur.</div>
+        </form>
+    </div>
+
+<script>
+const $ = id => document.getElementById(id);
+function safeNext() {
+    const raw = new URLSearchParams(location.search).get("next") || "";
+    const dec = decodeURIComponent(raw);
+    if (/^[\w][\w./?=&%\-]*\.html([?#].*)?$/.test(dec) && !dec.includes("://") && !dec.startsWith("//")) return dec;
+    return "dashboard.html";
+}
+function showErr(msg) { const e = $("err"); e.textContent = msg; e.style.display = "block"; }
+$("login-form").addEventListener("submit", async (ev) => {
+    ev.preventDefault();
+    $("err").style.display = "none";
+    const btn = $("btn-login"); btn.disabled = true; const prev = btn.textContent; btn.textContent = "Connexion…";
+    try {
+        const r = await fetch("/api/auth/login", {
+            method: "POST", headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ username: $("username").value.trim(), password: $("password").value }),
+        });
+        const d = await r.json().catch(() => ({}));
+        if (r.ok && d.ok) { location.replace(safeNext()); return; }
+        showErr(d.error || ("Échec de la connexion (HTTP " + r.status + ")."));
+    } catch (e) { showErr("Serveur injoignable : " + e.message); }
+    finally { btn.disabled = false; btn.textContent = prev; }
+});
+</script>
+</body>
+</html>

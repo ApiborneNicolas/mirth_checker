@@ -14,3 +14,7 @@
 /superviseur.db-wal
 /superviseur.db-shm
 /superviseur.db.bak
+/checker_cert.pem
+/checker_key.pem
+/superviseur_cert.pem
+/superviseur_key.pem

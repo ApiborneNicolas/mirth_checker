@@ -12,6 +12,8 @@
     <script>
         (function(){try{var t=localStorage.getItem("mc-theme");if(!t)t=matchMedia("(prefers-color-scheme: light)").matches?"light":"dark";document.documentElement.setAttribute("data-theme",t);}catch(e){document.documentElement.setAttribute("data-theme","dark");}})();
     </script>
+    <!-- Authentification (wrapper fetch + injection nav) : AVANT tout autre script. -->
+    <script src="auth.js"></script>
     <link rel="stylesheet" href="theme.css">
     <script src="theme.js" defer></script>
     <style>
@@ -245,7 +247,7 @@ function cellAge(s) {
         + (st.latency_ms != null && st.ok ? `<br><span style="opacity:.7">${Math.round(st.latency_ms)} ms</span>` : "");
 }
 function cellAccess(s) {
-    const url = `http://${s.host}:${s.port}/`;
+    const url = `${s.scheme || "http"}://${s.host}:${s.port}/`;
     return `<button class="small" onclick="event.stopPropagation();window.open('${url}','_blank')">↗ Ouvrir</button>`;
 }
 
@@ -365,7 +367,7 @@ function buildDetailRow(s) {
     const st = s.status || {};
     const tr = document.createElement("tr");
     tr.className = "detail-row";
-    const url = `http://${s.host}:${s.port}/`;
+    const url = `${s.scheme || "http"}://${s.host}:${s.port}/`;
     const chips = [];
     if (st.hostname) chips.push(`Hôte : <b>${esc(st.hostname)}</b>`);
     if (st.os) chips.push(`OS : <b>${esc(st.os)}</b>`);

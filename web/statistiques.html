@@ -12,6 +12,8 @@
     <script>
         (function(){try{var t=localStorage.getItem("mc-theme");if(!t)t=matchMedia("(prefers-color-scheme: light)").matches?"light":"dark";document.documentElement.setAttribute("data-theme",t);}catch(e){document.documentElement.setAttribute("data-theme","dark");}})();
     </script>
+    <!-- Authentification (wrapper fetch + injection nav) : AVANT tout autre script. -->
+    <script src="auth.js"></script>
     <link rel="stylesheet" href="theme.css">
     <script src="theme.js" defer></script>
     <style>

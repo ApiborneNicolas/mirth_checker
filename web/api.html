@@ -8,6 +8,8 @@
     <script>
         (function(){try{var t=localStorage.getItem("mc-theme");if(!t)t=matchMedia("(prefers-color-scheme: light)").matches?"light":"dark";document.documentElement.setAttribute("data-theme",t);}catch(e){document.documentElement.setAttribute("data-theme","dark");}})();
     </script>
+    <!-- Authentification (wrapper fetch + injection nav) : AVANT tout autre script. -->
+    <script src="auth.js"></script>
     <link rel="stylesheet" href="theme.css">
     <script src="theme.js" defer></script>
     <style>
@@ -83,6 +85,25 @@
                     <select id="endpoint"></select>
                 </div>
                 <div class="endpoint-desc" id="endpoint-desc"></div>
+            </div>
+
+            <div class="panel">
+                <h2>Jeton Bearer de session</h2>
+                <div class="hint" id="auth-hint">
+                    Les requêtes utilisent votre session en cours. Générez le jeton Bearer
+                    de cette session pour l'utiliser dans les exemples cURL ou depuis
+                    l'extérieur (superviseur, scripts).
+                </div>
+                <div class="free-row" style="margin-top:10px;">
+                    <input type="text" id="token-val" readonly placeholder="(aucun jeton généré)"
+                           style="font-family:var(--mono);font-size:12px;">
+                    <button class="small" id="btn-token">🔑 Obtenir</button>
+                    <button class="small" id="copy-token" style="display:none;">📋 Copier</button>
+                </div>
+                <label class="checks" style="margin-top:8px;">
+                    <input type="checkbox" id="use-bearer" style="width:auto;">
+                    Utiliser le jeton Bearer pour les requêtes (au lieu du cookie)
+                </label>
             </div>
 
             <div class="panel">
@@ -310,6 +331,7 @@ const ENDPOINTS = [
 const $ = id => document.getElementById(id);
 let lastBody = "";          // dernier corps de réponse brut (pour copie / sauvegarde)
 let lastExt = "txt";        // extension suggérée pour l'enregistrement
+let SESSION_TOKEN = "";     // jeton Bearer de la session courante (frappé à la demande)
 
 // ----------------------------------------------------------------------
 // Construction du sélecteur d'endpoints
@@ -491,10 +513,19 @@ function collectRequest() {
 // ----------------------------------------------------------------------
 // Génération de la commande cURL
 // ----------------------------------------------------------------------
+function bearerActive() {
+    return !!(SESSION_TOKEN && $("use-bearer") && $("use-bearer").checked);
+}
+
 function updateCurl() {
     const r = collectRequest();
     let cmd = `curl "${r.url}"`;
     if (r.method !== "GET") cmd = `curl -X ${r.method} "${r.url}"`;
+    // HTTPS auto-signé : -k pour ignorer la vérification du certificat.
+    if (location.protocol === "https:") cmd += ` \\\n  -k`;
+    if (bearerActive()) {
+        cmd += ` \\\n  -H "Authorization: Bearer ${SESSION_TOKEN}"`;
+    }
     if (r.hasBody) {
         const json = JSON.stringify(r.body);
         cmd += ` \\\n  -H "Content-Type: application/json" \\\n  -d '${json}'`;
@@ -528,10 +559,14 @@ async function sendRequest() {
     $("r-status").className = "v";
     showOverlay(true);
 
-    const opts = { method: r.method };
+    const opts = { method: r.method, headers: {} };
     if (r.hasBody) {
-        opts.headers = { "Content-Type": "application/json" };
+        opts.headers["Content-Type"] = "application/json";
         opts.body = JSON.stringify(r.body);
+    }
+    // Jeton Bearer explicite (démontre l'usage du jeton de session pour l'API).
+    if (bearerActive()) {
+        opts.headers["Authorization"] = "Bearer " + SESSION_TOKEN;
     }
 
     const t0 = performance.now();
@@ -625,6 +660,40 @@ function saveResponse() {
 // ----------------------------------------------------------------------
 // Branchements
 // ----------------------------------------------------------------------
+// ----------------------------------------------------------------------
+// Jeton Bearer de la session (page API)
+// ----------------------------------------------------------------------
+async function fetchToken() {
+    const btn = $("btn-token");
+    btn.disabled = true;
+    try {
+        const r = await fetch("/api/auth/token", {
+            method: "POST", headers: { "Content-Type": "application/json" }, body: "{}",
+        });
+        const d = await r.json().catch(() => ({}));
+        if (r.ok && d.ok) {
+            SESSION_TOKEN = d.token;
+            $("token-val").value = d.token;
+            $("copy-token").style.display = "";
+            $("use-bearer").checked = true;
+            $("auth-hint").textContent =
+                "Jeton actif jusqu'au " + (d.expires_at || "?") + " (fenêtre 24 h glissante).";
+            updateCurl();
+        } else {
+            $("auth-hint").textContent = d.error
+                || "Jeton indisponible (authentification désactivée sur ce serveur ?).";
+        }
+    } catch (e) {
+        $("auth-hint").textContent = "Erreur : " + e.message;
+    } finally {
+        btn.disabled = false;
+    }
+}
+
+$("btn-token").addEventListener("click", fetchToken);
+$("copy-token").addEventListener("click", e => copyText($("token-val").value, e.target));
+$("use-bearer").addEventListener("change", updateCurl);
+
 sel.addEventListener("change", renderParams);
 $("known-params").addEventListener("input", updateCurl);
 $("known-params").addEventListener("change", updateCurl);

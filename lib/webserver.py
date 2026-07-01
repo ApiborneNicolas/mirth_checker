@@ -53,6 +53,8 @@ class Request:
         self.headers = headers
         self.body = body          # bytes
         self.params = params      # paramètres extraits du motif de route
+        self.client_ip = None     # IP du client (posée par le dispatcher)
+        self.user = None          # utilisateur authentifié (dict) ou None
 
     def get(self, key, default=None):
         return self.query.get(key, default)
@@ -120,7 +122,7 @@ class Router:
         return None, None
 
 
-def _build_handler_class(router):
+def _build_handler_class(router, security=None):
     class _Handler(BaseHTTPRequestHandler):
         server_version = "CheckerService/1.0"
 
@@ -180,6 +182,21 @@ def _build_handler_class(router):
         def _dispatch(self, method):
             parsed = urlparse(self.path)
             path = parsed.path
+
+            # Sécurité (couches 0/1/3) : filtre IP + authentification, appliqués
+            # AVANT tout routage. Un refus court-circuite la requête (403/401).
+            if security is not None:
+                try:
+                    denied = security.check(self, path)
+                except Exception:
+                    import traceback
+                    traceback.print_exc()
+                    self._json({"error": "security check failed"}, status=500)
+                    return
+                if denied is not None:
+                    self._send(denied)
+                    return
+
             query_multi = parse_qs(parsed.query)
             query = {k: v[0] for k, v in query_multi.items()}
 
@@ -202,6 +219,13 @@ def _build_handler_class(router):
 
             req = Request(method, path, query, self.headers, body, params)
             req.query_multi = query_multi
+            # Contexte de sécurité exposé aux handlers : IP client + utilisateur
+            # authentifié (posé par SecurityPolicy.check, sinon None).
+            try:
+                req.client_ip = self.client_address[0]
+            except Exception:
+                req.client_ip = None
+            req.user = getattr(self, "_auth_user", None)
 
             try:
                 result = handler(req)
@@ -231,13 +255,19 @@ def _build_handler_class(router):
     return _Handler
 
 
-def serve(router, host="0.0.0.0", port=8800):
+def serve(router, host="0.0.0.0", port=8800, security=None):
     """
     Démarre le serveur (bloquant). Retourne l'instance ThreadingHTTPServer si
     l'appelant souhaite la fermer ; en pratique cette fonction boucle jusqu'à
     KeyboardInterrupt.
+
+    `security` (SecurityPolicy) : porte le filtre IP + l'authentification
+    (appliqués par le hook du handler) et, s'il est présent, un `tls_context`
+    dont on enveloppe le socket serveur (HTTPS).
     """
-    handler_class = _build_handler_class(router)
+    handler_class = _build_handler_class(router, security)
     httpd = _ExclusiveHTTPServer((host, port), handler_class)
     httpd.daemon_threads = True
+    if security is not None and getattr(security, "tls_context", None) is not None:
+        httpd.socket = security.tls_context.wrap_socket(httpd.socket, server_side=True)
     return httpd

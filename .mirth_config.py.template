@@ -20,3 +20,46 @@ MIRTH_VERIFY_SSL = False
 # Nom du processus système hébergeant Mirth, surveillé pour l'historisation
 # CPU / mémoire / sockets (ex. "mcservice.exe", "mirth.exe", "java.exe").
 MIRTH_PROCESS = "mcservice.exe"
+
+
+# ==========================================================================
+# SÉCURITÉ DE L'INTERFACE WEB (checker_service & superviseur)
+# --------------------------------------------------------------------------
+# Ces réglages protègent l'interface web / l'API. Ils sont lus par
+# checker_service ET superviseur. Précédence : arguments CLI > variables
+# d'environnement (mêmes noms) > ce fichier > défauts. Chaque couche est
+# désactivable pour un déploiement en réseau de confiance (VPN / LAN privé).
+# ==========================================================================
+
+# --- HTTPS ---------------------------------------------------------------
+# "auto" : HTTPS activé automatiquement dès que l'écoute n'est PAS sur
+#          localhost (127.0.0.1/::1) — idéal pour un serveur exposé.
+# "on"   : HTTPS toujours (échec bloquant si aucun certificat disponible).
+# "off"  : HTTP toujours (réseau privé/VPN de confiance).
+HTTPS_MODE = "auto"
+
+# Certificat/clé TLS fournis (PEM). Laissez vides pour qu'un certificat
+# auto-signé soit GÉNÉRÉ au 1er démarrage à côté de l'exécutable
+# (checker_cert.pem/checker_key.pem, superviseur_cert.pem/...). Nécessite la
+# bibliothèque `cryptography` (déjà dans requirements.txt) ou un certificat fourni.
+HTTPS_CERT = ""
+HTTPS_KEY = ""
+
+# --- Filtre IP (liste blanche CIDR) --------------------------------------
+# Liste d'adresses/plages autorisées à joindre l'interface. Liste VIDE = tout
+# autorisé (rétro-compatible). localhost est toujours toléré. IPv4/IPv6 + CIDR.
+#   ex. ALLOWED_IPS = ["127.0.0.1", "192.168.0.0/16", "10.0.0.0/8"]
+ALLOWED_IPS = []
+
+# --- Authentification par comptes ----------------------------------------
+# True  : accès protégé par comptes (id/mot de passe) + session 24 h glissante.
+#         Créez le 1er administrateur depuis la machine locale via
+#         `python checker_service.py --add-admin NOM --email adr@ets.fr`
+#         (ou depuis l'UI locale : localhost est toléré tant qu'aucun compte
+#         n'existe). Les autres comptes se gèrent ensuite sur la page 👤 Comptes.
+# False : API ouverte (réseau de confiance uniquement).
+AUTH_ENABLED = True
+
+# Durée (heures) de la session glissante : chaque requête authentifiée repousse
+# l'échéance ; passé ce délai d'inactivité, une reconnexion est requise.
+SESSION_TTL_H = 24

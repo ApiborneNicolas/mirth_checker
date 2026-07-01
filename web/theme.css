@@ -231,7 +231,7 @@ button.warn:hover:not(:disabled) { background: color-mix(in srgb, var(--warn) 26
 
 /* ===================== CHAMPS DE SAISIE ============================ */
 select, textarea,
-input[type=text], input[type=number], input[type=email],
+input[type=text], input[type=number], input[type=email], input[type=password],
 input[type=file], input[type=datetime-local], input[type=date] {
     background: var(--panel-2);
     color: var(--text);
